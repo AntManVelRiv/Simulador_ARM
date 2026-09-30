@@ -1,0 +1,175 @@
+name: Build ARMSim
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+
+  pull_request:
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # -------------------------------------------------
+          # Windows x64
+          # -------------------------------------------------
+          - name: armsim-windows-x64
+            os: windows-latest
+            artifact: armsim-windows-x64
+            executable: armsim.exe
+
+          # -------------------------------------------------
+          # Linux x64
+          # -------------------------------------------------
+          - name: armsim-linux-x64
+            os: ubuntu-latest
+            artifact: armsim-linux-x64
+            executable: armsim
+
+          # -------------------------------------------------
+          # macOS ARM64
+          # -------------------------------------------------
+          - name: armsim-macos-arm64
+            os: macos-15
+            artifact: armsim-macos-arm64
+            executable: armsim
+
+    steps:
+      # -----------------------------------------------------
+      # Descargar código
+      # -----------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------
+      # Instalar dependencias
+      # -----------------------------------------------------
+      - name: Instalar dependencias Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libsdl2-dev \
+            libgl1-mesa-dev
+
+      - name: Instalar dependencias macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake ninja sdl2
+
+      - name: Instalar dependencias Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install cmake ninja -y
+
+      # -----------------------------------------------------
+      # Configurar CMake
+      # -----------------------------------------------------
+      - name: Configurar CMake
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DARMSIM_BUILD_TESTS=ON
+
+      # -----------------------------------------------------
+      # Compilar
+      # -----------------------------------------------------
+      - name: Compilar
+        run: |
+          cmake --build build --config Release --parallel
+
+      # -----------------------------------------------------
+      # Ejecutar pruebas
+      # -----------------------------------------------------
+      - name: Ejecutar tests
+        working-directory: build
+        run: |
+          ctest --output-on-failure -C Release
+
+      # -----------------------------------------------------
+      # Preparar paquete
+      # -----------------------------------------------------
+      - name: Preparar paquete
+        shell: bash
+        run: |
+          mkdir -p package
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "build/${{ matrix.executable }}" package/
+          else
+            cp "build/${{ matrix.executable }}" package/
+          fi
+
+      # -----------------------------------------------------
+      # Subir como artefacto de GitHub Actions
+      # -----------------------------------------------------
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/
+
+      # -----------------------------------------------------
+      # Guardar para Release
+      # -----------------------------------------------------
+      - name: Comprimir paquete
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          cd package
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../${{ matrix.artifact }}.zip" *
+          else
+            tar -czf "../${{ matrix.artifact }}.tar.gz" *
+          fi
+
+      - name: Subir paquete para Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.tar.gz
+
+  # =========================================================
+  # RELEASE
+  # =========================================================
+
+  release:
+    name: Crear Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Descargar paquetes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Crear GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/*.tar.gz
+          generate_release_notes: true
