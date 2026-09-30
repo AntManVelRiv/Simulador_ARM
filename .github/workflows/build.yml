@@ -65,38 +65,62 @@ jobs:
       - name: Instalar dependencias macOS
         if: runner.os == 'macOS'
         run: |
-          brew update
           brew install cmake ninja sdl2
+
+      # SDL2 no está en choco: se instala vía vcpkg y se pasa como toolchain a CMake.
+      # Se cachea entre ejecuciones porque compilar SDL2 desde vcpkg tarda varios minutos.
+      - name: Preparar vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        id: vcpkg-cache
+        with:
+          path: C:\vcpkg
+          key: vcpkg-sdl2-x64-windows-${{ runner.os }}
 
       - name: Instalar dependencias Windows
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: pwsh
         run: |
-          choco install cmake ninja -y
+          choco install ninja -y
+          if (-not (Test-Path C:\vcpkg)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
+          }
+          C:\vcpkg\vcpkg.exe install sdl2:x64-windows
+
+      # Pone cl.exe (MSVC) en el PATH; sin esto, Ninja no encuentra compilador en Windows.
+      - name: Configurar entorno MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       # -----------------------------------------------------
       # Configurar CMake
       # -----------------------------------------------------
-      - name: Configurar CMake
-        run: |
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DARMSIM_BUILD_TESTS=ON
+      # IMPORTANTE: cada línea es un "run:" independiente (sin continuadores \ o `)
+      # para que funcione igual en bash (Linux/macOS) y en pwsh (Windows).
+      - name: Configurar CMake (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARMSIM_BUILD_TESTS=ON
+
+      - name: Configurar CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARMSIM_BUILD_TESTS=ON -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
 
       # -----------------------------------------------------
       # Compilar
       # -----------------------------------------------------
       - name: Compilar
-        run: |
-          cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel
 
       # -----------------------------------------------------
       # Ejecutar pruebas
       # -----------------------------------------------------
       - name: Ejecutar tests
         working-directory: build
-        run: |
-          ctest --output-on-failure -C Release
+        run: ctest --output-on-failure -C Release
 
       # -----------------------------------------------------
       # Preparar paquete
@@ -105,11 +129,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p package
+          cp "build/${{ matrix.executable }}" package/
+          cp -r assets package/ 2>/dev/null || true
 
+          # En Windows hay que llevarse SDL2.dll: el ejecutable la enlaza dinámicamente
+          # y sin ella no arranca al descomprimir el paquete en otra máquina.
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "build/${{ matrix.executable }}" package/
-          else
-            cp "build/${{ matrix.executable }}" package/
+            cp "C:/vcpkg/installed/x64-windows/bin/SDL2.dll" package/
           fi
 
       # -----------------------------------------------------
