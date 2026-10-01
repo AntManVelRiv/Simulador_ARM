@@ -70,6 +70,16 @@ else()
 endif()
 target_link_libraries(armsim PRIVATE armsim_view)
 
+# add_executable(... WIN32 ...) construye una app de subsistema Windows (sin consola),
+# lo que exige un punto de entrada WinMain en vez de main(). SDL2 resuelve esto por
+# nosotros: SDL.h redirige "main" a "SDL_main", y SDL2main.lib aporta el WinMain real
+# que lo invoca. Sin enlazar SDL2main, el enlazador falla con "unresolved external
+# symbol WinMain" (LNK2019). SDL2::SDL2main lo provee tanto vcpkg como la distribución
+# oficial de SDL2 para Windows.
+if(WIN32 AND TARGET SDL2::SDL2main)
+  target_link_libraries(armsim PRIVATE SDL2::SDL2main)
+endif()
+
 if(APPLE)
   target_link_libraries(armsim PRIVATE "-framework CoreFoundation")
 endif()
