@@ -24,12 +24,16 @@ add_library(imgui STATIC
   ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+# imgui_impl_opengl3.cpp carga las funciones de OpenGL con dlopen() en tiempo de
+# ejecución (en Linux/macOS). CMAKE_DL_LIBS añade -ldl donde hace falta (en algunos
+# sistemas, como ciertas Raspberry Pi OS de 32 bits, no se cuela solo como dependencia
+# transitiva de otra librería) y no añade nada donde no es necesario (p. ej. Windows).
 if(TARGET SDL2::SDL2)
-  target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
+  target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL ${CMAKE_DL_LIBS})
   target_include_directories(imgui PUBLIC $<TARGET_PROPERTY:SDL2::SDL2,INTERFACE_INCLUDE_DIRECTORIES>)
 else()
   target_include_directories(imgui PUBLIC ${SDL2_INCLUDE_DIRS})
-  target_link_libraries(imgui PUBLIC ${SDL2_LIBRARIES} OpenGL::GL)
+  target_link_libraries(imgui PUBLIC ${SDL2_LIBRARIES} OpenGL::GL ${CMAKE_DL_LIBS})
 endif()
 
 add_library(texteditor STATIC ${TEDIT_DIR}/TextEditor.cpp)
@@ -63,20 +67,33 @@ add_library(armsim_view STATIC
 target_link_libraries(armsim_view PUBLIC armsim_controller imgui texteditor)
 
 # --------------------------------- Ejecutable ----------------------------------
+# add_executable(... WIN32 ...) construye una app de subsistema Windows (sin consola),
+# lo que exige un punto de entrada WinMain en vez de main(). SDL2 resuelve esto por
+# nosotros: SDL.h redirige "main" a "SDL_main", y SDL2::SDL2main aporta el WinMain
+# real que lo invoca. Sin enlazar SDL2main, el enlazador falla con "unresolved
+# external symbol WinMain" (LNK2019).
+#
+# Por si en algún entorno (vcpkg antiguo, SDL2 del sistema, triplet distinto...)
+# ese target no existiera con ese nombre exacto, lo comprobamos ANTES de decidir el
+# subsistema: si no está disponible, construimos un ejecutable de consola normal
+# (aparecerá una ventana de consola detrás de la GUI, pero el enlazado nunca falla
+# por este motivo) en vez de arriesgarnos a repetir el error de enlazado.
+set(ARMSIM_USE_WIN32_SUBSYSTEM FALSE)
 if(WIN32)
+  if(TARGET SDL2::SDL2main)
+    set(ARMSIM_USE_WIN32_SUBSYSTEM TRUE)
+  else()
+    message(WARNING "SDL2::SDL2main no disponible: armsim se construira con subsistema de consola en Windows (se vera una ventana de consola junto a la GUI).")
+  endif()
+endif()
+
+if(ARMSIM_USE_WIN32_SUBSYSTEM)
   add_executable(armsim WIN32 src/main.cpp)
 else()
   add_executable(armsim src/main.cpp)
 endif()
 target_link_libraries(armsim PRIVATE armsim_view)
-
-# add_executable(... WIN32 ...) construye una app de subsistema Windows (sin consola),
-# lo que exige un punto de entrada WinMain en vez de main(). SDL2 resuelve esto por
-# nosotros: SDL.h redirige "main" a "SDL_main", y SDL2main.lib aporta el WinMain real
-# que lo invoca. Sin enlazar SDL2main, el enlazador falla con "unresolved external
-# symbol WinMain" (LNK2019). SDL2::SDL2main lo provee tanto vcpkg como la distribución
-# oficial de SDL2 para Windows.
-if(WIN32 AND TARGET SDL2::SDL2main)
+if(ARMSIM_USE_WIN32_SUBSYSTEM)
   target_link_libraries(armsim PRIVATE SDL2::SDL2main)
 endif()
 

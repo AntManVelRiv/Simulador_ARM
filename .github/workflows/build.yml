@@ -22,16 +22,31 @@ jobs:
           # Windows x64
           # -------------------------------------------------
           - name: armsim-windows-x64
-            os: windows-latest
+            # windows-latest está migrando a Visual Studio 2026 (toolset 18.x, aún beta):
+            # se fija windows-2022 (Visual Studio 2022 estable) para evitar builds que
+            # fallan por el cambio de compilador, no por el propio código.
+            os: windows-2022
             artifact: armsim-windows-x64
             executable: armsim.exe
 
           # -------------------------------------------------
-          # Linux x64
+          # Linux x64 (Ubuntu, Debian, Fedora, Arch, WSL...)
           # -------------------------------------------------
           - name: armsim-linux-x64
             os: ubuntu-22.04   # glibc 2.35: binario compatible con distros más antiguas que ubuntu-latest (glibc 2.39)
             artifact: armsim-linux-x64
+            executable: armsim
+
+          # -------------------------------------------------
+          # Linux ARM64 — runner nativo (sin QEMU): Raspberry Pi 4/5 con
+          # Raspberry Pi OS de 64 bits (el que trae por defecto desde 2022).
+          # Para Raspberry Pi OS de 32 bits (armhf, modelos antiguos o Pi Zero/1/2)
+          # no hay runner gratuito de GitHub: compílalo directamente en la propia
+          # Pi con install-deps.sh (ver README).
+          # -------------------------------------------------
+          - name: armsim-linux-arm64
+            os: ubuntu-22.04-arm
+            artifact: armsim-linux-arm64
             executable: armsim
 
           # -------------------------------------------------
