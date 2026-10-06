@@ -15,49 +15,62 @@ Aplicación de escritorio nativa en C++ para ensamblar y ejecutar programas ARMv
 
 ## Descargar
 
-Ve a la pestaña **Actions** de este repositorio (o a **Releases** si se ha publicado una etiqueta `vX.Y.Z`) y descarga el paquete de tu sistema operativo (`armsim-windows-x64`, `armsim-linux-x64` o `armsim-macos-arm64`), generados automáticamente por el flujo de compilación multiplataforma en `.github/workflows/build.yml`.
+Ve a la pestaña **Actions** de este repositorio (o a **Releases** si se ha publicado una etiqueta `vX.Y.Z`) y descarga el paquete de tu sistema operativo, generados automáticamente por el flujo de compilación multiplataforma en `.github/workflows/build.yml`:
+
+| Paquete | Sistema |
+|---|---|
+| `armsim-windows-x64` | Windows 10/11, 64 bits |
+| `armsim-linux-x64` | Linux de escritorio (Ubuntu, Debian, Fedora, Arch...), 64 bits |
+| `armsim-linux-arm64` | Raspberry Pi 4/5 con Raspberry Pi OS de **64 bits** (el que trae por defecto desde 2022) u otro Linux ARM64 |
+| `armsim-macos-arm64` | macOS con Apple Silicon (M1/M2/M3...) |
+
+> Para Raspberry Pi OS de **32 bits** (armhf: modelos antiguos, Pi Zero/1/2, o una instalación de 32 bits en Pi 3/4) no hay artefacto prebuilt — GitHub no ofrece runners ARM de 32 bits gratuitos. Compílalo directamente en la propia Pi: es rápido con `install-deps.sh` (ver abajo).
 
 ## Compilar tú mismo
 
-Requisitos: un compilador con C++17, [CMake](https://cmake.org/) ≥ 3.16 y la librería de desarrollo de **SDL2**.
+Requisitos: un compilador con C++17, [CMake](https://cmake.org/) ≥ 3.16 y la librería de desarrollo de **SDL2**. El proyecto no usa submódulos de git: un `git clone` normal ya trae todo lo necesario (Dear ImGui e ImGuiColorTextEdit están vendorizados como código fuente en `third_party/`).
 
-### Linux (Ubuntu/Debian)
+### Linux — cualquier distribución (Ubuntu, Debian, Raspberry Pi OS, Fedora, openSUSE, Arch, Alpine...)
+
+El script `install-deps.sh` detecta tu gestor de paquetes (`apt`, `dnf`, `zypper`, `pacman` o `apk`) e instala lo necesario automáticamente — funciona igual en un PC con Ubuntu que en una Raspberry Pi:
 
 ```bash
-sudo apt install build-essential cmake libsdl2-dev libgl1-mesa-dev git
-git clone --recursive <url-del-repositorio> armsim && cd armsim
+git clone <url-del-repositorio> armsim && cd armsim
+chmod +x install-deps.sh && ./install-deps.sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ./build/armsim
 ```
 
-### Windows (Visual Studio + vcpkg)
+En una Raspberry Pi con poca RAM (1-2 GB), compila con menos trabajos en paralelo para no quedarte sin memoria: `cmake --build build --parallel 2`.
+
+### Windows (Visual Studio 2022 + vcpkg)
+
+El script `install-deps.ps1` instala Git/CMake si faltan (con `winget`) y compila SDL2 con vcpkg:
 
 ```powershell
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-C:\vcpkg\vcpkg.exe install sdl2:x64-windows
-
-git clone --recursive <url-del-repositorio> armsim
+git clone <url-del-repositorio> armsim
 cd armsim
+powershell -ExecutionPolicy Bypass -File install-deps.ps1
+
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
 cmake --build build --config Release
 build\Release\armsim.exe
 ```
 
-También puedes abrir la carpeta directamente en Visual Studio 2022 (que detecta `CMakeLists.txt` automáticamente) o generar un `.sln` con `cmake -B build -G "Visual Studio 17 2022"`.
+Necesitas Visual Studio 2022 con el workload **"Desarrollo para el escritorio con C++"** instalado (CMake lo usa como compilador). También puedes abrir la carpeta directamente en Visual Studio 2022, que detecta `CMakeLists.txt` automáticamente.
+
+> Si mueves `armsim.exe` a otra carpeta o a otro PC, llévate también `C:\vcpkg\installed\x64-windows\bin\SDL2.dll` — se enlaza dinámicamente.
 
 ### macOS
 
 ```bash
 brew install cmake sdl2
-git clone --recursive <url-del-repositorio> armsim && cd armsim
+git clone <url-del-repositorio> armsim && cd armsim
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ./build/armsim
 ```
-
-> **Nota sobre `--recursive`**: las bibliotecas de terceros (Dear ImGui e ImGuiColorTextEdit) ya están incluidas como código fuente dentro de `third_party/`, así que un `git clone` normal es suficiente; `--recursive` solo hace falta si en tu copia están configuradas como submódulos de git.
 
 ### Compilar sin interfaz gráfica (solo el núcleo y las pruebas)
 
@@ -92,6 +105,9 @@ src/
 tests/tests.cpp       pruebas del modelo y del controlador (sin GUI): 109 comprobaciones
 third_party/          Dear ImGui (rama docking) e ImGuiColorTextEdit, vendorizados como fuente
 assets/fonts/         JetBrains Mono (licencia OFL, incluida)
+install-deps.sh       instala las dependencias en cualquier Linux (detecta apt/dnf/zypper/pacman/apk)
+install-deps.ps1      instala las dependencias en Windows (Git/CMake + SDL2 vía vcpkg)
+.github/workflows/    CI: compila para Windows, Linux x64, Linux ARM64 y macOS en cada push
 ```
 
 El **modelo** (`SimModel`) es la única fuente de verdad: guarda el código fuente, el programa ensamblado, la máquina, la traza de ejecución, los puntos de parada y las preferencias. No sabe nada de ImGui ni de SDL. El **controlador** (`SimController`) es la única vía para modificar el modelo: ensamblar, ejecutar, pausar, editar un registro, enviar una línea a la consola, cambiar de tema, etc. La **vista** (`MainView` y las clases `Panel`) solo lee el modelo para dibujar y llama al controlador cuando el usuario interactúa — nunca modifica el modelo directamente. Esta separación es la que permite compilar y probar `armsim_model` + `armsim_controller` sin ninguna librería gráfica (ver `tests/tests.cpp`).
@@ -114,6 +130,14 @@ Además de terminar el programa (`SWI 0x11`), el emulador ofrece un pequeño con
 | `0x32` | Lee una línea en el buffer `[R1]` (máximo `R2` bytes); longitud → `R0` |
 
 Las llamadas de lectura **detienen la ejecución** ("esperando entrada") hasta que el usuario escribe algo en el panel **Consola** y pulsa Intro o "Enviar"; el programa continúa automáticamente en cuanto llega el dato. El menú **Archivo → Ejemplos** incluye dos programas interactivos ("Consola: leer y sumar dos enteros" y "Consola: leer el nombre y saludar") que lo demuestran.
+
+## Notas de compilación (problemas ya resueltos)
+
+Si partes de una copia antigua del proyecto o tocas el `CMakeLists.txt`/el flujo de CI, ten en cuenta estos tres puntos — ya están corregidos en este repositorio, pero son fáciles de reintroducir por accidente:
+
+- **Windows / `LNK2019: unresolved external symbol WinMain`**: el ejecutable se construye con `add_executable(armsim WIN32 ...)` para no mostrar una ventana de consola, lo que exige un punto de entrada `WinMain`. SDL2 lo resuelve enlazando `SDL2::SDL2main` (que a su vez redirige a nuestro `main()` normal vía `SDL.h`). Si ese target no existiera en tu entorno, el `CMakeLists.txt` cae automáticamente a un ejecutable de consola en vez de fallar el enlazado.
+- **Linux / `undefined reference to dlopen@@GLIBC_2.4`**: el backend de OpenGL de Dear ImGui carga funciones con `dlopen()` en tiempo de ejecución. En algunos sistemas (observado en Raspberry Pi OS de 32 bits) `libdl` no se enlaza automáticamente como dependencia transitiva. Se añade `${CMAKE_DL_LIBS}` explícitamente al enlazar `imgui`.
+- **`windows-latest` en GitHub Actions**: a fecha de este README, `windows-latest` está migrando a Visual Studio 2026 (toolset 18.x, todavía en beta) y puede dar fallos de compilación ajenos al propio código. El flujo de CI fija `windows-2022` (Visual Studio 2022 estable) a propósito.
 
 ## Licencias de terceros
 

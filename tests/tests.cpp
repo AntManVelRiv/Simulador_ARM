@@ -4,6 +4,7 @@
 #include "controller/SimController.h"
 #include <iostream>
 #include <functional>
+#include <filesystem>
 using namespace arm;
 
 static int failures = 0, total = 0;
@@ -87,7 +88,11 @@ int main() {
       ctl.editorChanged(".data\nx: .word 1\n.text\nLDR R0,=x\nLDR R1,[R0]\n"); ctl.assemble();
       CHECK(model.program().symbols.at("x") == 0x8000); CHECK(model.machine()->r[7] == 42); CHECK(model.machine()->readWord(0x9004) == 6);
       // persistencia de ajustes
-      SettingsStore::save(model.settings(), "/tmp/armsim_test_settings.ini"); Settings loaded; SettingsStore::load(loaded, "/tmp/armsim_test_settings.ini");
+      // Ruta de temporales multiplataforma: "/tmp/..." a pelo no existe en Windows,
+      // y std::ofstream no crea directorios que falten, así que el archivo nunca se
+      // llegaba a escribir y la prueba comparaba contra un Settings por defecto.
+      std::string tmpSettingsFile = (std::filesystem::temp_directory_path() / "armsim_test_settings.ini").string();
+      SettingsStore::save(model.settings(), tmpSettingsFile); Settings loaded; SettingsStore::load(loaded, tmpSettingsFile);
       CHECK(loaded.sim.opt.dataBase == 0x8000); CHECK(loaded.ui.theme == model.settings().ui.theme);
       ctl.applyThemePreset(3); CHECK(model.settings().ui.theme == 3);
       // consola interactiva a traves del controlador
