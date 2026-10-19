@@ -85,6 +85,17 @@ int parseReg(const std::string& sIn) {
 }
 
 // ============================================================================
+// Funciones de biblioteca simuladas (printf, scanf, puts, gets, strlen)
+// ============================================================================
+const std::vector<std::string> LIB_FUNC_NAMES = {"printf", "scanf", "puts", "gets", "strlen"};
+const char* libraryFunctionName(uint32_t addr) {
+    if (addr < LIB_BASE) return nullptr;
+    uint32_t idx = (addr - LIB_BASE) / 4;
+    if (idx >= LIB_FUNC_NAMES.size()) return nullptr;
+    return LIB_FUNC_NAMES[idx].c_str();
+}
+
+// ============================================================================
 // AsmException — se usa internamente para propagar errores con línea/hint
 // ============================================================================
 struct AsmException : std::runtime_error {
@@ -661,6 +672,124 @@ struct RawItem {
     uint32_t addr = 0;
 };
 
+// ============================================================================
+// Macros: ".macro NOMBRE p1, p2, ..." ... cuerpo ... ".endm" / ".endmacro"
+// Sintaxis estilo GNU as: dentro del cuerpo, "\p1" se sustituye por el argumento
+// correspondiente en cada invocacion, y "\@" por un numero unico de invocacion
+// (util para etiquetas locales dentro de una macro que se usa varias veces).
+// ============================================================================
+struct MacroDef { std::string name; std::vector<std::string> params; std::vector<std::string> body; int defLine = 0; };
+
+// Sustituye "\param" (y "\@") en una linea del cuerpo de una macro por los
+// argumentos de esta invocacion concreta. Los nombres de parametro mas largos
+// se comprueban antes que los mas cortos para que, p.ej., "\ab" no se confunda
+// con "\a" seguido de "b".
+static std::string substituteMacroParams(const std::string& lineIn, const std::vector<std::string>& params, const std::vector<std::string>& args, long invocationId) {
+    std::vector<size_t> order(params.size()); for (size_t i=0;i<order.size();i++) order[i]=i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b){ return params[a].size() > params[b].size(); });
+    std::string out; 
+    for (size_t i=0;i<lineIn.size();i++) {
+        if (lineIn[i] != '\\') { out += lineIn[i]; continue; }
+        if (i+1<lineIn.size() && lineIn[i+1]=='@') { out += std::to_string(invocationId); i++; continue; }
+        bool matched = false;
+        for (size_t oi : order) {
+            const std::string& p = params[oi];
+            if (!p.empty() && lineIn.compare(i+1, p.size(), p) == 0) {
+                // que no siga otro caracter de identificador (para no matchear un prefijo)
+                size_t after = i+1+p.size();
+                bool boundary = after>=lineIn.size() || !(std::isalnum((unsigned char)lineIn[after]) || lineIn[after]=='_');
+                if (boundary) { out += (oi < args.size() ? args[oi] : ""); i += p.size(); matched = true; break; }
+            }
+        }
+        if (!matched) out += lineIn[i]; // backslash suelto o parametro no reconocido: se deja tal cual
+    }
+    return out;
+}
+
+static long g_macroInvocationCounter = 0;
+
+// Expande recursivamente (hasta una profundidad razonable) las invocaciones de
+// macro dentro de "in", devolviendo la lista de lineas ya expandida. Los errores
+// (macro desconocida, numero de argumentos erroneo...) se anotan en out_errors.
+static void expandMacroInvocation(const RawLine& rl, const std::map<std::string, MacroDef>& macros, int depth, std::vector<RawLine>& out, std::vector<AsmError>& errs) {
+    if (depth > 25) { errs.push_back({rl.lineNo, "Demasiados niveles de macros anidadas (¿una macro se invoca a si misma?)", ""}); return; }
+    std::string text = stripComment(rl.text);
+    std::string working = text;
+    // Preserva etiquetas "NOMBRE:" al principio de la linea (pueden ir antes de
+    // una invocacion de macro en la misma linea) tal cual, sin tocarlas.
+    std::string labelPrefix;
+    for (;;) {
+        std::string t = trim(working);
+        size_t p = 0; while (p<t.size() && (std::isalnum((unsigned char)t[p])||t[p]=='_'||t[p]=='.'||t[p]=='$')) p++;
+        if (p==0 || p>=t.size() || t[p]!=':') break;
+        std::string name = t.substr(0,p);
+        if (!std::isalpha((unsigned char)name[0]) && name[0]!='_' && name[0]!='.' && name[0]!='$') break;
+        labelPrefix += name + ": ";
+        working = t.substr(p+1);
+    }
+    std::string trimmed = trim(working);
+    if (trimmed.empty()) { if (!labelPrefix.empty()) out.push_back({rl.lineNo, labelPrefix}); else out.push_back(rl); return; }
+    size_t sp = trimmed.find_first_of(" \t");
+    std::string firstTok = sp==std::string::npos ? trimmed : trimmed.substr(0,sp);
+    auto mit = macros.find(upper(firstTok));
+    if (mit == macros.end()) { out.push_back({rl.lineNo, labelPrefix + trimmed}); return; }
+    const MacroDef& m = mit->second;
+    if (!labelPrefix.empty()) out.push_back({rl.lineNo, labelPrefix});
+    std::string rest = sp==std::string::npos ? "" : trim(trimmed.substr(sp+1));
+    std::vector<std::string> args = rest.empty() ? std::vector<std::string>() : splitTop(rest);
+    if (args.size() != m.params.size()) {
+        errs.push_back({rl.lineNo, "La macro \"" + m.name + "\" espera " + std::to_string(m.params.size()) + " argumento(s) y se le han pasado " + std::to_string(args.size()), "Definida en la linea " + std::to_string(m.defLine) + " como: .macro " + m.name + (m.params.empty()?"":" " ) + [&]{std::string s; for(size_t i=0;i<m.params.size();i++){ if(i) s+=", "; s+=m.params[i];} return s;}()});
+        return;
+    }
+    long invId = ++g_macroInvocationCounter;
+    for (const std::string& bodyLine : m.body) {
+        std::string expanded = substituteMacroParams(bodyLine, m.params, args, invId);
+        expandMacroInvocation(RawLine{rl.lineNo, expanded}, macros, depth+1, out, errs);
+    }
+}
+
+static std::vector<RawLine> expandMacros(const std::vector<RawLine>& in, std::vector<AsmError>& errs) {
+    std::map<std::string, MacroDef> macros;
+    std::vector<RawLine> withoutDefs;
+    bool inMacro = false; MacroDef cur;
+    for (auto& rl : in) {
+        std::string text = stripComment(rl.text); std::string t = trim(text);
+        if (!inMacro) {
+            std::string up = upper(t);
+            bool isMacroStart = (up == ".MACRO") || (up.size() > 6 && up.compare(0, 6, ".MACRO") == 0 && std::isspace((unsigned char)up[6]));
+            if (isMacroStart) {
+                std::string rest = trim(t.substr(6));
+                std::istringstream iss(rest); std::string name; iss >> name;
+                if (name.empty()) { errs.push_back({rl.lineNo, ".macro necesita un nombre: .macro NOMBRE [param1, param2...]", ""}); continue; }
+                std::string restParams; std::getline(iss, restParams); restParams = trim(restParams);
+                if (!restParams.empty() && restParams[0]==',') restParams = trim(restParams.substr(1));
+                cur = MacroDef{}; cur.name = name; cur.defLine = rl.lineNo;
+                cur.params = restParams.empty() ? std::vector<std::string>() : splitTop(restParams);
+                inMacro = true;
+                continue;
+            }
+            withoutDefs.push_back(rl);
+        } else {
+            std::string up = upper(t);
+            if (up==".ENDM" || up==".ENDMACRO") {
+                macros[upper(cur.name)] = cur;
+                inMacro = false;
+                continue;
+            }
+            bool isNestedMacroStart = (up == ".MACRO") || (up.size() > 6 && up.compare(0, 6, ".MACRO") == 0 && std::isspace((unsigned char)up[6]));
+            if (isNestedMacroStart) { errs.push_back({rl.lineNo, "No se permiten macros anidadas en su definicion (cierra la anterior con .endm primero)", ""}); continue; }
+            cur.body.push_back(rl.text); // se guarda sin recortar: stripComment se aplica al expandir
+        }
+    }
+    if (inMacro) errs.push_back({cur.defLine, "La macro \"" + cur.name + "\" no tiene un .endm que la cierre", ""});
+    if (!errs.empty()) return {};
+    if (macros.empty()) return in; // atajo: nada que expandir, se conserva el texto tal cual (incluye comentarios)
+
+    std::vector<RawLine> out;
+    for (auto& rl : withoutDefs) expandMacroInvocation(rl, macros, 0, out, errs);
+    return out;
+}
+
 Program assemble(const std::string& source, const AsmOptions& opt) {
     Program prog; prog.opt = opt;
     std::vector<RawLine> lines;
@@ -672,6 +801,11 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
             if (i==norm.size() || norm[i]=='\n') { lines.push_back({ln, norm.substr(start,i-start)}); ln++; start=i+1; }
         }
     }
+
+    // Expande ".macro ... .endm" ANTES de todo lo demas: a partir de aqui, el resto
+    // del ensamblador no sabe ni le importa que una linea venga de una macro.
+    lines = expandMacros(lines, prog.errors);
+    if (!prog.errors.empty()) { prog.ok = false; return prog; }
 
     std::map<std::string,uint32_t> symTmp;
     std::vector<RawItem> items;
@@ -767,6 +901,14 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
     prog.poolEnd = prog.textEnd;   // el pool de literales va justo despues del codigo
 
     if (!prog.errors.empty()) { prog.ok = false; return prog; }
+
+    // Funciones de biblioteca simuladas: si el programa no ha definido su propia
+    // etiqueta con ese nombre, "printf"/"scanf"/"puts"/"gets"/"strlen" resuelven a
+    // una direccion reservada (LIB_BASE...) que Machine::step() intercepta.
+    for (size_t i = 0; i < LIB_FUNC_NAMES.size(); i++) {
+        const std::string& name = LIB_FUNC_NAMES[i];
+        if (!symTmp.count(name)) symTmp[name] = LIB_BASE + (uint32_t)(4 * i);
+    }
 
     std::vector<std::pair<std::string,uint32_t>> poolEntries;
     auto poolAddrFor = [&](const std::string& expr)->uint32_t {
@@ -880,6 +1022,7 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                     if (rel % 4 != 0) throw AsmException("El destino del salto no esta alineado a 4 bytes");
                     ins.branchOffsetWords = rel/4;
                     encodeBranch(ins);
+                    if (const char* lf = libraryFunctionName(target)) ins.note = std::string("Llamada a la funcion de biblioteca ") + lf + "() (simulada): ver su efecto en la Consola y/o la memoria.";
                 } else if (pm.kind=="bx") {
                     ins.mnemonic=pm.base; ins.t = IType::BX; if (toks.empty()) throw AsmException("BX espera un registro"); ins.rm=parseReg(toks[0]); if(ins.rm<0) throw AsmException("Se esperaba un registro");
                     encodeBX(ins);
@@ -986,7 +1129,7 @@ void Machine::reset() {
     pc = prog_.textStart;
     f = Flags{};
     halted = false; haltReason.clear(); haltKind.clear();
-    steps = 0; output.clear();
+    steps = 0; output.clear(); lastWasLibraryCall = false;
     mem.clear(); touched.clear();
     history.clear();
     for (auto& kv : prog_.initialMem) mem[kv.first] = kv.second;
@@ -1050,6 +1193,77 @@ std::string Machine::takeLine() {
     return s;
 }
 
+std::string Machine::readCString(uint32_t addr, size_t maxLen) const {
+    std::string s;
+    for (size_t i = 0; i < maxLen; i++) { uint8_t b = readByte(addr + (uint32_t)i); if (!b) break; s += (char)b; }
+    return s;
+}
+
+// Simula el efecto de una llamada "BL printf/scanf/puts/gets/strlen" (convenio AAPCS:
+// argumentos en R0..R3; printf/scanf usan R0 como formato y R1..R3 como argumentos).
+void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
+    lastWasLibraryCall = true;
+    if (fn == "printf") {
+        std::string fmt = readCString(r[0]);
+        int argi = 1; std::string outp;
+        for (size_t i = 0; i < fmt.size(); i++) {
+            if (fmt[i] == '%' && i + 1 < fmt.size()) {
+                char c = fmt[++i]; uint32_t av = (argi <= 3) ? r[argi] : 0;
+                switch (c) {
+                    case 's': outp += readCString(av); argi++; break;
+                    case 'd': outp += std::to_string((int32_t)av); argi++; break;
+                    case 'u': outp += std::to_string(av); argi++; break;
+                    case 'x': outp += hex(av); argi++; break;
+                    case 'c': outp += (char)(av & 0xFF); argi++; break;
+                    case '%': outp += '%'; break;
+                    default: outp += '%'; outp += c; break;
+                }
+            } else outp += fmt[i];
+        }
+        output += outp;
+        uint32_t old = r[0]; r[0] = (uint32_t)outp.size(); rec.regs.push_back({0, old, r[0]});
+        rec.sym = "printf(\"" + fmt + "\", ...)";
+        rec.num = "escribe " + std::to_string(outp.size()) + " caracteres";
+        rec.text = "Llama a printf: interpreta el formato de R0 y los argumentos de R1-R3 (%s, %d, %u, %x, %c, %%), y escribe el resultado por consola.";
+    } else if (fn == "scanf") {
+        std::string fmt = readCString(r[0]);
+        std::string line = takeLine();
+        std::istringstream iss(line);
+        int argi = 1, filled = 0;
+        for (size_t i = 0; i < fmt.size(); i++) {
+            if (fmt[i] == '%' && i + 1 < fmt.size() && argi <= 3) {
+                char c = fmt[++i]; uint32_t dest = r[argi++];
+                if (c == 'd') { int v = 0; if (iss >> v) { writeWord(dest, (uint32_t)v, &rec); filled++; } }
+                else if (c == 'u' || c == 'x') { unsigned v = 0; if (iss >> v) { writeWord(dest, (uint32_t)v, &rec); filled++; } }
+                else if (c == 's') { std::string s; if (iss >> s) { for (size_t k = 0; k < s.size(); k++) writeByte(dest + (uint32_t)k, (uint8_t)s[k], &rec); writeByte(dest + (uint32_t)s.size(), 0, &rec); filled++; } }
+                else if (c == 'c') { char ch; if (iss.get(ch)) { writeByte(dest, (uint8_t)ch, &rec); filled++; } }
+            }
+        }
+        uint32_t old = r[0]; r[0] = (uint32_t)filled; rec.regs.push_back({0, old, (uint32_t)filled});
+        rec.sym = "scanf(\"" + fmt + "\", ...)";
+        rec.num = "entrada: \"" + line + "\"";
+        rec.text = "Lee una linea de la consola (\"" + line + "\") y rellena, segun el formato, los punteros pasados en R1-R3; R0 recibe cuantos valores se han leido (" + std::to_string(filled) + ").";
+    } else if (fn == "puts") {
+        std::string s = readCString(r[0]);
+        output += s + "\n";
+        uint32_t old = r[0]; r[0] = (uint32_t)(s.size() + 1); rec.regs.push_back({0, old, r[0]});
+        rec.sym = "puts(\"" + s + "\")";
+        rec.text = "Escribe la cadena apuntada por R0 y un salto de linea por consola.";
+    } else if (fn == "gets") {
+        std::string line = takeLine(); uint32_t a = r[0];
+        for (size_t k = 0; k < line.size(); k++) writeByte(a + (uint32_t)k, (uint8_t)line[k], &rec);
+        writeByte(a + (uint32_t)line.size(), 0, &rec);
+        rec.sym = "gets(buf)";
+        rec.num = "\"" + line + "\"";
+        rec.text = "Lee una linea completa de la consola y la guarda (con un 0 final) en el buffer apuntado por R0, sin comprobar su tamano (como el gets() real: cuidado con el desbordamiento).";
+    } else if (fn == "strlen") {
+        uint32_t a = r[0]; uint32_t n = (uint32_t)readCString(a).size();
+        uint32_t old = r[0]; r[0] = n; rec.regs.push_back({0, old, n});
+        rec.sym = "strlen(...)";
+        rec.text = "Calcula la longitud de la cadena apuntada por R0 (sin contar el 0 final): " + std::to_string(n) + ".";
+    }
+}
+
 std::optional<StepRecord> Machine::step() {
     if (halted) return std::nullopt;
     auto it = prog_.byAddr.find(pc);
@@ -1063,7 +1277,19 @@ std::optional<StepRecord> Machine::step() {
         if (isCharRead && !hasPendingChar()) { halt("Esperando un caracter de entrada (SWI 0x31). Escribelo en la consola.", "input"); return std::nullopt; }
         if (isLineRead && !hasPendingLine()) { halt("Esperando una linea de entrada (SWI " + hx0x(ins.swiNum,2) + "). Escribela en la consola y pulsa Enter.", "input"); return std::nullopt; }
     }
+    // Lo mismo para "BL scanf" / "BL gets": si el destino del salto es una funcion
+    // de biblioteca de lectura y no hay una linea completa todavia, bloquea ANTES
+    // de tocar nada (ni siquiera LR), para que al reintentar se re-ejecute limpio.
+    if (ins.t == IType::BR && condPass(ins.cond, f)) {
+        uint32_t tgt = (uint32_t)((int32_t)(pc + 8) + ins.branchOffsetWords * 4);
+        const char* fn = libraryFunctionName(tgt);
+        if (fn && (std::string(fn) == "scanf" || std::string(fn) == "gets") && !hasPendingLine()) {
+            halt("Esperando una linea de entrada para " + std::string(fn) + "(). Escribela en la consola y pulsa Enter.", "input");
+            return std::nullopt;
+        }
+    }
 
+    lastWasLibraryCall = false;
     Snapshot snap; snap.r = r; snap.pc = pc; snap.f = f; snap.outLenBefore = (long)output.size();
     StepRecord rec; rec.addr = pc; rec.ins = ins; rec.pcOld = pc; rec.flagsOld = f;
 
@@ -1160,8 +1386,17 @@ std::optional<StepRecord> Machine::step() {
         case IType::BR: {
             if (ins.link) { uint32_t old=r[14]; r[14]=pc+4; rec.regs.push_back({14, old, r[14]}); }
             nextPc = (uint32_t)((int32_t)pcPlus8 + ins.branchOffsetWords*4);
-            rec.sym = (ins.link? std::string("LR <- ")+hx0x(pc+4)+"; ":"") + "PC <- " + hx0x(nextPc);
-            rec.text = ins.link? "Guarda la direccion de retorno en LR y salta." : "Salta a la direccion indicada.";
+            if (const char* fn = libraryFunctionName(nextPc)) {
+                // El destino es una funcion de biblioteca simulada (printf, scanf...):
+                // se ejecuta su efecto aqui mismo y se vuelve de inmediato a LR, como si
+                // la funcion hubiera hecho ya su propio "BX LR". Si no se enlazo (era un
+                // "B" en vez de "BL"), se vuelve a donde apuntara LR previamente.
+                runLibraryCall(fn, rec);
+                nextPc = r[14];
+            } else {
+                rec.sym = (ins.link? std::string("LR <- ")+hx0x(pc+4)+"; ":"") + "PC <- " + hx0x(nextPc);
+                rec.text = ins.link? "Guarda la direccion de retorno en LR y salta." : "Salta a la direccion indicada.";
+            }
             break;
         }
         case IType::BX: {
@@ -1266,6 +1501,11 @@ std::optional<StepRecord> Machine::step() {
         if (steps >= MAX_STEPS) halt("Limite de " + std::to_string(MAX_STEPS) + " instrucciones alcanzado (bucle infinito?).", "limit");
         else if (prog_.byAddr.find(pc) == prog_.byAddr.end()) {
             if (pc >= prog_.textEnd) halt("El programa ha llegado al final del codigo.", "end");
+            // Patron habitual en los apuntes: "main" termina con POP+BX LR sin que
+            // nadie haya hecho BL a main (no hay un invocador real en el simulador).
+            // Como LR vale 0 al arrancar, PC=0 aqui significa "main ha vuelto", no un
+            // fallo: se trata como fin de programa en vez de un error de ejecucion.
+            else if (pc == 0) halt("El programa ha vuelto a LR = 0 (main termino con BX LR sin que nadie le hiciera BL): fin de la ejecucion.", "exit");
             else halt("PC (" + hx0x(pc) + ") no apunta a ninguna instruccion.", "error");
         }
     }

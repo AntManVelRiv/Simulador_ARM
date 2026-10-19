@@ -23,6 +23,7 @@ void EditorPanel::configureLanguage() {
     for (auto m : {"LDMIA","LDMIB","LDMDA","LDMDB","LDMFD","LDMFA","LDMED","LDMEA","STMIA","STMIB","STMDA","STMDB","STMFD","STMFA","STMED","STMEA"}) lang.mKeywords.insert(m);
     for (int i = 0; i <= 15; i++) { TextEditor::Identifier id; id.mDeclaration = "Registro R" + std::to_string(i); lang.mIdentifiers.insert({"R" + std::to_string(i), id}); }
     for (auto r : {"SP","LR","PC","FP","IP","SL","SB"}) { TextEditor::Identifier id; id.mDeclaration = "Registro"; lang.mIdentifiers.insert({r, id}); }
+    for (auto fn : {"printf","scanf","puts","gets","strlen"}) { TextEditor::Identifier id; id.mDeclaration = "Funcion de biblioteca simulada (BL " + std::string(fn) + ")"; lang.mIdentifiers.insert({fn, id}); }
     lang.mTokenRegexStrings.push_back({"\\.[A-Za-z]+", TextEditor::PaletteIndex::Preprocessor});
     lang.mTokenRegexStrings.push_back({"#-?0[xX][0-9a-fA-F]+", TextEditor::PaletteIndex::Number});
     lang.mTokenRegexStrings.push_back({"#-?[0-9]+", TextEditor::PaletteIndex::Number});

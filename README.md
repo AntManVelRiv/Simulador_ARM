@@ -131,6 +131,35 @@ Además de terminar el programa (`SWI 0x11`), el emulador ofrece un pequeño con
 
 Las llamadas de lectura **detienen la ejecución** ("esperando entrada") hasta que el usuario escribe algo en el panel **Consola** y pulsa Intro o "Enviar"; el programa continúa automáticamente en cuanto llega el dato. El menú **Archivo → Ejemplos** incluye dos programas interactivos ("Consola: leer y sumar dos enteros" y "Consola: leer el nombre y saludar") que lo demuestran.
 
+### `BL printf`, `BL scanf` y otras funciones de biblioteca
+
+Además de las llamadas `SWI` de arriba, el simulador reconoce `printf`, `scanf`, `puts`, `gets` y `strlen` como si existieran de verdad: no hace falta definirlas, `BL printf` resuelve solo y, al ejecutarse, simula el efecto real de la función (y vuelve igual que si hubiera hecho su propio `BX LR`) — útil para seguir al pie de la letra los ejercicios que llaman directamente a funciones de la biblioteca C en vez de usar `SWI`.
+
+| Llamada | Efecto |
+|---|---|
+| `BL printf` | `R0` = formato, `R1`-`R3` = argumentos. Admite `%s %d %u %x %c %%`. Escribe por consola; `R0` ← caracteres escritos. |
+| `BL scanf` | `R0` = formato, `R1`-`R3` = punteros donde guardar lo leído (`%d %u %x %s %c`). Bloquea hasta tener una línea; `R0` ← nº de valores leídos. |
+| `BL puts` | `R0` = cadena a escribir; añade un salto de línea. |
+| `BL gets` | `R0` = buffer donde guardar la línea leída (sin límite de tamaño, como el `gets()` real). Bloquea hasta tener una línea. |
+| `BL strlen` | `R0` = cadena; devuelve su longitud en `R0`. |
+
+Si defines tu propia etiqueta con uno de estos nombres, la tuya tiene prioridad sobre la simulada.
+
+### Macros (`.macro` / `.endm`)
+
+Sintaxis estilo GNU `as`: dentro del cuerpo, `\parametro` se sustituye por el argumento de cada invocación, y `\@` por un número único por invocación (para etiquetas locales si la macro se usa varias veces):
+
+```armasm
+.macro reducir a,b,c
+add \a,\a,\b
+add \a,\a,\c
+.endm
+...
+reducir r0,r1,r2     @ se expande aquí mismo a los dos ADD de arriba
+```
+
+El menú **Archivo → Ejemplos** incluye "Macro: reducir(a,b,c)" y "BL printf: pasar una cadena a mayúsculas" — ambos tomados literalmente de los ejercicios de la Relación 2 de Arquitectura de Computadores (UAL) — y "Consola: printf y scanf (estilo C)".
+
 ## Notas de compilación (problemas ya resueltos)
 
 Si partes de una copia antigua del proyecto o tocas el `CMakeLists.txt`/el flujo de CI, ten en cuenta estos tres puntos — ya están corregidos en este repositorio, pero son fáciles de reintroducir por accidente:

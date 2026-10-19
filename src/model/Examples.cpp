@@ -171,6 +171,95 @@ prompt: .asciz "Como te llamas? "
 hola:   .asciz "Hola, "
 buf:    .space 32
 )ASM"},
+ {"Macro: reducir(a,b,c)", R"ASM(@ Relación 2, ejercicio 3(b): la misma suma de tres valores, pero
+@ como macro en vez de como llamada a un procedimiento con BL.
+        .macro reducir a,b,c
+        add  \a, \a, \b
+        add  \a, \a, \c
+        .endm
+
+        .data
+x:      .word 0
+        .text
+        .global main
+main:   push {r10, lr}
+        mov  r0, #3
+        mov  r1, #4
+        mov  r2, #5
+        reducir r0, r1, r2   @ se expande aquí mismo a los dos ADD de arriba
+        ldr  r3, =x
+        str  r0, [r3]
+        pop  {r10, lr}
+        bx   lr
+)ASM"},
+ {"BL printf: pasar una cadena a mayúsculas", R"ASM(@ Relación 2, ejercicio 4: Capital(cadena, N) pone en mayúsculas una
+@ cadena de caracteres; se imprime el resultado con BL printf y %s.
+main:   push {r2, lr}
+        ldr  r0, =msg1
+        ldr  r1, =array
+        bl   printf
+        ldr  r0, =array
+        mov  r1, #15
+        bl   Capital
+        ldr  r0, =msg2
+        ldr  r1, =array
+        bl   printf
+        pop  {r2, lr}
+        bx   lr
+
+Capital: push {r4, r5, r6, lr}
+        mov   r4, #0
+bucle:  cmp   r4, r1
+        bgt   finbucle
+        ldrb  r5, [r0, r4]
+        cmp   r5, #97
+        blt   conti
+        cmp   r5, #122
+        bgt   conti
+        sub   r5, r5, #32
+        strb  r5, [r0, r4]
+conti:  add   r4, r4, #1
+        b     bucle
+finbucle: pop {r4, r5, r6, lr}
+        bx    lr
+
+        .data
+array:  .asciz "Una prueba"
+msg1:   .asciz "Antes de Capital %s\n"
+msg2:   .asciz "Despues de Capital %s\n"
+)ASM"},
+ {"Consola: printf y scanf (estilo C)", R"ASM(@ Lo mismo que el ejemplo "Consola: leer y sumar dos enteros" pero
+@ usando printf/scanf de verdad (BL) en vez de las llamadas SWI.
+        ldr  r0, =msg1
+        bl   printf
+        ldr  r0, =fmtd
+        ldr  r1, =n1
+        bl   scanf        @ lee un entero y lo guarda en n1
+
+        ldr  r0, =msg2
+        bl   printf
+        ldr  r0, =fmtd
+        ldr  r1, =n2
+        bl   scanf
+
+        ldr  r1, =n1
+        ldr  r1, [r1]
+        ldr  r2, =n2
+        ldr  r2, [r2]
+        add  r3, r1, r2
+        ldr  r0, =msgr
+        mov  r1, r3
+        bl   printf        @ printf("Suma = %d\n", r3)
+        swi  0x11
+
+        .data
+msg1:   .asciz "Primer numero: "
+msg2:   .asciz "Segundo numero: "
+msgr:   .asciz "Suma = %d\n"
+fmtd:   .asciz "%d"
+n1:     .word 0
+n2:     .word 0
+)ASM"},
  {"Multiplicación de 64 bits", R"ASM(        LDR    R0, =0x80000000
         MOV    R1, #2
         MUL    R4, R0, R1         @ solo 32 bits bajos

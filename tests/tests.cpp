@@ -59,6 +59,34 @@ int main() {
       m.run(100); CHECK(m.r[4] == 'Z'); CHECK(m.r[5] == 2);   // "Z" ya se leyo con SWI 0x31; queda "bc"
       uint32_t buf = p.symbols.at("buf"); CHECK(m.readByte(buf) == 'b'); CHECK(m.readByte(buf+1) == 'c'); CHECK(m.readByte(buf+2) == 0); }
 
+    // --- Macros (.macro / .endm), estilo GNU as con sustitucion \param ---
+    { // la macro "reducir" del ejercicio de la Relacion 2 (UAL)
+      auto p = assemble(".macro reducir a,b,c\nadd \\a,\\a,\\b\nadd \\a,\\a,\\c\n.endm\n\n.data\nx: .word 0\n.text\n.global main\nmain: push {r10,lr}\nmov r0, #3\nmov r1, #4\nmov r2, #5\nreducir r0,r1,r2\nldr r3,=x\nstr r0,[r3]\npop {r10,lr}\nbx lr\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.r[0] == 12); CHECK(m.readWord(p.symbols.at("x")) == 12); } }
+    { auto p = assemble(".macro foo a,b\nadd \\a,\\a,\\b\n.endm\nfoo r0\n"); CHECK(!p.ok); }  // num. de argumentos incorrecto
+    { // "\@" da un identificador unico por invocacion: la misma macro dos veces no choca de etiquetas
+      auto p = assemble(".macro incr r\ncmp \\r,#0\nbeq skip\\@\nadd \\r,\\r,#1\nskip\\@:\n.endm\nmov r0,#5\nmov r1,#0\nincr r0\nincr r1\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.r[0] == 6); CHECK(m.r[1] == 0); } }
+
+    // --- Funciones de biblioteca simuladas por "BL": printf, scanf, puts, gets, strlen ---
+    { // el ejemplo exacto de "capital" con printf("%s") de la Relacion 2 (UAL)
+      auto p = assemble("main: push {r2,lr}\nldr r0, =msg1\nldr r1,=array\nbl printf\nldr r0, =array\nmov r1, #15\nbl Capital\nldr r0, =msg2\nldr r1, =array\nbl printf\npop {r2,lr}\nbx lr\n"
+                         "Capital: push {r4,r5,r6,lr}\nmov r4,#0\nbucle: cmp r4, r1\nbgt finbucle\nldrb r5, [r0, r4]\ncmp r5, #97\nblt conti\ncmp r5, #122\nbgt conti\nsub r5, r5, #32\nstrb r5, [r0, r4]\nconti: add r4,r4,#1\nb bucle\nfinbucle: pop {r4,r5,r6,lr}\nbx lr\n"
+                         ".data\narray: .asciz \"abc\"\nmsg1: .asciz \"Antes: %s\\n\"\nmsg2: .asciz \"Despues: %s\\n\"\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(10000); CHECK(m.output == "Antes: abc\nDespues: ABC\n"); } }
+    { auto p = assemble("ldr r0,=fmt\nmov r1,#7\nmov r2,#9\nbl printf\n.data\nfmt: .asciz \"%d+%d\"\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "7+9"); } }
+    { // scanf bloquea hasta tener una linea de entrada, igual que SWI 0x30
+      auto p = assemble(".data\nfmt: .asciz \"%d\"\nv: .word 0\n.text\nldr r0,=fmt\nldr r1,=v\nbl scanf\n");
+      Machine m(p); m.run(100); CHECK(m.halted); CHECK(m.haltKind == "input");
+      m.feedInput("123\n"); CHECK(!m.halted); m.run(100); CHECK(m.readWord(p.symbols.at("v")) == 123); }
+    { auto p = assemble("ldr r0,=s\nbl puts\nldr r0,=s\nbl strlen\nmov r4,r0\n.data\ns: .asciz \"hola\"\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "hola\n"); CHECK(m.r[4] == 4); } }
+    { auto p = assemble(".data\nbuf: .space 16\n.text\nldr r0,=buf\nbl gets\n");
+      Machine m(p); m.run(100); CHECK(m.halted && m.haltKind == "input");
+      m.feedInput("mundo\n"); m.run(100);
+      uint32_t b = p.symbols.at("buf"); CHECK(m.readByte(b) == 'm'); CHECK(m.readByte(b + 4) == 'o'); CHECK(m.readByte(b + 5) == 0); }
+
     // --- Ejemplos incluidos: todos ensamblan y terminan sin error ---
     for (auto& e : examples()) { auto p = assemble(e.code); CHECK(p.ok); if (!p.ok) { std::cerr << "  ejemplo: " << e.name << "\n"; continue; }
         Machine m(p); m.run(100000); CHECK(m.haltKind != "error" && m.haltKind != "limit"); }

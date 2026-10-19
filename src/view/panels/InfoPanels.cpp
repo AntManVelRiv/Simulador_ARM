@@ -96,6 +96,41 @@ void ReferencePanel::content(ViewContext& c) {
         ImGui::EndTable();
     }
     ImGui::TextDisabled("Las llamadas de lectura detienen el programa (\"esperando entrada\") hasta que escribes algo en la consola y pulsas Enviar o Intro.");
+
+    if (ImGui::CollapsingHeader("Funciones de biblioteca simuladas (BL)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextWrapped("Ademas de las SWI de arriba, puedes llamar a estas funciones con BL como si existieran de verdad: no hace falta definirlas, el ensamblador las resuelve solas.");
+        static const S libs[] = {
+            {"BL printf","R0 = formato (cadena); R1..R3 = argumentos. Admite %s %d %u %x %c %%. Escribe el resultado por consola; R0 devuelve los caracteres escritos."},
+            {"BL scanf","R0 = formato; R1..R3 = punteros donde guardar lo leido (%d %u %x %s %c). Bloquea hasta tener una linea; R0 devuelve cuantos valores se han leido."},
+            {"BL puts","R0 = cadena a escribir; anade un salto de linea. R0 devuelve los caracteres escritos."},
+            {"BL gets","R0 = buffer donde guardar la linea leida (sin limite de tamano, como el gets() real). Bloquea hasta tener una linea."},
+            {"BL strlen","R0 = cadena; devuelve su longitud en R0 (sin contar el cero final)."},
+        };
+        if (ImGui::BeginTable("##libs", 2, ImGuiTableFlags_RowBg)) {
+            for (auto& x : libs) { ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextColored(p.accent, "%s", x.n); ImGui::TableNextColumn(); ImGui::TextWrapped("%s", x.d); }
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("Si defines tu propia etiqueta con uno de estos nombres (p.ej. tu propio \"strlen:\"), tiene prioridad y se usa la tuya en vez de la simulada.");
+    }
+
+    if (ImGui::CollapsingHeader("Macros (.macro / .endm)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextWrapped("Definen una secuencia de instrucciones reutilizable que se expande en el propio codigo al invocarla (sin saltos ni pila, a diferencia de una llamada a procedimiento).");
+        static const char* ex =
+            ".macro reducir a,b,c\n"
+            "add \\a,\\a,\\b\n"
+            "add \\a,\\a,\\c\n"
+            ".endm\n"
+            "...\n"
+            "reducir r0,r1,r2    @ se expande a los dos ADD de arriba, con r0,r1,r2";
+        ImGui::BeginChild("##macroex", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 6.5f), true);
+        ImGui::TextUnformatted(ex);
+        ImGui::EndChild();
+        ImGui::Spacing();
+        ImGui::BulletText("Dentro del cuerpo, \\nombre se sustituye por el argumento correspondiente en cada invocacion.");
+        ImGui::BulletText("\\@ se sustituye por un numero unico por invocacion: util para etiquetas locales si la macro se usa varias veces (p.ej. \"fin\\@:\").");
+        ImGui::BulletText("El numero de argumentos debe coincidir exactamente con los parametros declarados en .macro.");
+        ImGui::BulletText("Una macro puede invocar a otra (hasta 25 niveles), pero no puede definirse a si misma dentro de su propio cuerpo.");
+    }
 }
 
 void AboutPanel::content(ViewContext& c) {

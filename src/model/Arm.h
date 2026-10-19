@@ -16,6 +16,16 @@ namespace arm {
 constexpr uint32_t TEXT_BASE  = 0x00001000;
 constexpr uint32_t DATA_BASE  = 0x00002000;
 constexpr uint32_t STACK_TOP  = 0x20200000;
+// Direcciones reservadas para funciones de biblioteca simuladas (printf, scanf...).
+// "BL printf" salta aquí; Machine::step() intercepta la ejecución en este rango y
+// hace como si la función ya hubiera hecho su efecto y hubiera vuelto con BX LR.
+constexpr uint32_t LIB_BASE   = 0xFFFF0000;
+// Nombres de las funciones de biblioteca soportadas, en el mismo orden que sus
+// direcciones (LIB_BASE, LIB_BASE+4, LIB_BASE+8...). Se usa tanto al ensamblar
+// (para resolver "BL printf" sin que el usuario defina la etiqueta) como al
+// ejecutar (para saber qué función simular). Ver libraryFunctionName().
+extern const std::vector<std::string> LIB_FUNC_NAMES;
+const char* libraryFunctionName(uint32_t addr); // nullptr si addr no es una función de biblioteca
 constexpr int       MAX_STEPS  = 2'000'000;
 
 enum class Cond : int { EQ=0, NE=1, CS=2, CC=3, MI=4, PL=5, VS=6, VC=7, HI=8, LS=9, GE=10, LT=11, GT=12, LE=13, AL=14 };
@@ -196,6 +206,10 @@ public:
     bool hasPendingLine() const { return input_.find('\n', inputPos_) != std::string::npos; }
     std::string peekPendingInput() const { return input_.substr(inputPos_); }
 
+    // Bandera informativa (no de error): true tras ejecutar una llamada a una
+    // función de biblioteca simulada en el último step(). Útil para la interfaz.
+    bool lastWasLibraryCall = false;
+
     uint8_t  readByte(uint32_t a) const;
     uint32_t readWord(uint32_t a) const;
     void writeByte(uint32_t a, uint8_t v, StepRecord* rec = nullptr);
@@ -208,6 +222,8 @@ private:
     std::string input_; size_t inputPos_ = 0;
     char takeChar();
     std::string takeLine();
+    std::string readCString(uint32_t addr, size_t maxLen = 8192) const;
+    void runLibraryCall(const std::string& fn, StepRecord& rec);
     struct Snapshot {
         std::array<uint32_t,16> r; uint32_t pc; Flags f;
         std::vector<MemWrite> memUndo; // aplicar en orden inverso para deshacer
