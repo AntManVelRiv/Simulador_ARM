@@ -70,7 +70,7 @@ void ReferencePanel::content(ViewContext& c) {
     static const I list[] = {
         {"MOV / MVN","Rd, op2","Copia (o copia negado) op2 en Rd"},{"ADD / SUB / RSB","Rd, Rn, op2","Suma, resta, resta inversa"},{"ADC / SBC / RSC","Rd, Rn, op2","Con acarreo (carry)"},
         {"AND / ORR / EOR / BIC","Rd, Rn, op2","Lógicas bit a bit (BIC borra bits)"},{"LSL / LSR / ASR / ROR / RRX","Rd, Rm, #n|Rs","Desplazamientos y rotaciones"},
-        {"CMP / CMN / TST / TEQ","Rn, op2","Solo actualizan flags"},{"MUL / MLA","Rd, Rm, Rs[, Rn]","Multiplicación de 32 bits"},{"SMULL / UMULL / SMLAL / UMLAL","RdLo, RdHi, Rm, Rs","Multiplicación de 64 bits"},
+        {"CMP / CMN / TST / TEQ","Rn, op2","Solo actualizan flags"},{"MUL / MLA","Rd, Rm, Rs[, Rn]","Multiplicación de 32 bits (Rd puede ser igual a Rm, Rs o Rn)"},{"SMULL / UMULL / SMLAL / UMLAL","RdLo, RdHi, Rm, Rs","Multiplicación de 64 bits"},
         {"LDR / STR","Rd, [Rn, ...]","Palabra. Modos: [Rn,#o] [Rn,#o]! [Rn],#o [Rn,Rm,LSL #n]"},{"LDRB / STRB / LDRSB","Rd, [Rn, ...]","Byte (sin/con signo)"},{"LDRH / STRH / LDRSH","Rd, [Rn, ...]","Media palabra"},
         {"LDM / STM (IA IB DA DB FD ED FA EA)","Rn, {lista}","Carga/almacenamiento múltiple"},{"PUSH / POP","{lista}","Apilar / desapilar"},{"B / BL / BX","etiqueta | Rm","Saltos (BL guarda el retorno en LR)"},
         {"SWI","#n","Llamada al sistema: ver la tabla de abajo"},{"LDR Rd, =valor","","Pseudo-instrucción: carga cualquier constante o dirección"},

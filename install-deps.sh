@@ -31,6 +31,8 @@ if command -v apt-get >/dev/null 2>&1; then
   echo "==> apt (Ubuntu / Debian / Raspberry Pi OS / Linux Mint...)"
   $need_sudo apt-get update
   $need_sudo apt-get install -y build-essential cmake git libsdl2-dev libgl1-mesa-dev
+  # zenity: selector de archivos nativo para Abrir/Guardar (opcional; sin él se usa el explorador interno)
+  $need_sudo apt-get install -y zenity || true
 
 elif command -v dnf >/dev/null 2>&1; then
   echo "==> dnf (Fedora / RHEL / Rocky / AlmaLinux...)"

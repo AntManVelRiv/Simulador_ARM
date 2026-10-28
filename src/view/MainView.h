@@ -16,6 +16,11 @@ private:
     void toolbar();
     void handleInput();              // convierte teclas en órdenes al controlador
     void fileDialogs();
+    void startFileDialog(bool save);
+    void finishFileChoice(bool save, const std::string& path);
+public:
+    bool wantsFastPoll() const { return vs_.nativeBusy; }   // mientras esperamos al diálogo nativo hay que sondear a menudo
+private:
 
     SimModel& model_;
     SimController& ctrl_;

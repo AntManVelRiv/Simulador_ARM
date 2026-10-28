@@ -4,6 +4,9 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <cstdlib>
+#include <cctype>
+#include <filesystem>
 
 using namespace arm;
 
@@ -117,16 +120,61 @@ void SimModel::provideInput(const std::string& text) {
     if (wasWaiting) { setStatus("Entrada recibida", StatusKind::Ok); step(); }
 }
 
-bool SimModel::loadFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { setStatus("No se pudo abrir " + path, StatusKind::Error); return false; }
+// ---- Rutas: tolera lo que suele fallar al teclear/pegar una ruta (comillas, espacios, ~, file://, \\ de Windows...) ----
+std::string normalizeUserPath(std::string p) {
+    auto trim = [](std::string& t) { size_t a = t.find_first_not_of(" \t\r\n"); size_t b = t.find_last_not_of(" \t\r\n"); t = a == std::string::npos ? "" : t.substr(a, b - a + 1); };
+    trim(p);
+    if (p.size() >= 2 && ((p.front() == '"' && p.back() == '"') || (p.front() == '\'' && p.back() == '\''))) { p = p.substr(1, p.size() - 2); trim(p); }
+    if (p.rfind("file://", 0) == 0) {              // file:///home/x/a%20b.s (arrastrar desde algunos gestores de archivos)
+        p = p.substr(7); std::string d;
+        for (size_t i = 0; i < p.size(); i++) {
+            if (p[i] == '%' && i + 2 < p.size() + 0 && std::isxdigit((unsigned char)p[i+1]) && std::isxdigit((unsigned char)p[i+2])) { d += (char)std::stoi(p.substr(i + 1, 2), nullptr, 16); i += 2; }
+            else d += p[i];
+        }
+        p = d;
+#if defined(_WIN32)
+        if (p.size() > 2 && p[0] == '/' && p[2] == ':') p = p.substr(1);   // /C:/dir/f.s -> C:/dir/f.s
+#endif
+    }
+    if (!p.empty() && p[0] == '~' && (p.size() == 1 || p[1] == '/' || p[1] == '\\')) {
+#if defined(_WIN32)
+        const char* h = std::getenv("USERPROFILE");
+#else
+        const char* h = std::getenv("HOME");
+#endif
+        if (h) p = std::string(h) + p.substr(1);
+    }
+    return p;
+}
+
+static std::filesystem::path toFsPath(const std::string& s) {
+#if defined(__cpp_char8_t)
+    return std::filesystem::path(std::u8string(s.begin(), s.end()));      // UTF-8 -> ruta nativa (importante en Windows)
+#else
+    return std::filesystem::u8path(s);
+#endif
+}
+
+bool SimModel::loadFile(const std::string& rawPath) {
+    std::string path = normalizeUserPath(rawPath);
+    namespace fs = std::filesystem; std::error_code ec;
+    fs::path fp = toFsPath(path);
+    if (path.empty()) { setStatus("No se ha indicado ningún archivo", StatusKind::Error); return false; }
+    if (!fs::exists(fp, ec)) { setStatus("No existe el archivo: " + path, StatusKind::Error); return false; }
+    if (fs::is_directory(fp, ec)) { setStatus("Es una carpeta, no un archivo: " + path, StatusKind::Error); return false; }
+    std::ifstream f(fp, std::ios::binary);
+    if (!f) { setStatus("No se pudo abrir " + path + " (¿permisos?)", StatusKind::Error); return false; }
     std::stringstream ss; ss << f.rdbuf();
-    setSource(ss.str(), true); settings_.lastFile = path; assemble();
+    std::string text = ss.str();
+    if (text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) text.erase(0, 3);   // BOM UTF-8
+    setSource(text, true); settings_.lastFile = path; assemble();
     setStatus("Abierto: " + path, StatusKind::Ok);
     return true;
 }
-bool SimModel::saveFile(const std::string& path) {
-    std::ofstream f(path, std::ios::binary);
+bool SimModel::saveFile(const std::string& rawPath) {
+    std::string path = normalizeUserPath(rawPath);
+    if (path.empty()) { setStatus("No se ha indicado dónde guardar", StatusKind::Error); return false; }
+    std::ofstream f(toFsPath(path), std::ios::binary);
     if (!f) { setStatus("No se pudo guardar en " + path, StatusKind::Error); return false; }
     f << source_; settings_.lastFile = path;
     setStatus("Guardado: " + path, StatusKind::Ok);

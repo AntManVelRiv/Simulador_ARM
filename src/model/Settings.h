@@ -38,8 +38,19 @@ struct UiPrefs {
     int regFormat = 0;                   // 0 hex, 1 dec con signo, 2 dec sin signo, 3 binario
     int memCols = 16; bool memAscii = true;
     bool show[P_COUNT];
+    // Ahorro de energía: 0 = automático (se activa solo en una Raspberry Pi), 1 = siempre activado, 2 = desactivado.
+    // En modo ahorro la ventana NO se repinta 60 veces por segundo: solo se redibuja cuando hay entrada del usuario o
+    // el programa se está ejecutando (y a un máximo de ~20 FPS), y se apagan el fondo animado y el resto de animaciones.
+    int powerMode = 0;
+    bool lowPower = false;               // resultado efectivo (se calcula en SimModel::applySettings; no se guarda)
+    bool anim() const { return animations && !lowPower; }   // ¿animaciones realmente activas?
     UiPrefs();
 };
+
+// Resuelve el modo de ahorro: 0 = auto (Raspberry Pi), 1 = sí, 2 = no
+bool resolveLowPower(int powerMode);
+// Fuerza el modo desde la línea de órdenes (--low-power / --full-power); -1 = sin forzar
+void setPowerOverride(int forced);
 
 struct Settings { UiPrefs ui; SimConfig sim; std::string lastFile; };
 

@@ -55,6 +55,9 @@ void SettingsPanel::content(ViewContext& c) {
     ImGui::SeparatorText("Animaciones");
     ch |= ImGui::Checkbox("Animaciones activadas", &u.animations); ch |= ImGui::SliderFloat("Velocidad de animación", &u.animSpeed, 0.2f, 3.0f, "%.1fx");
     ch |= ImGui::Checkbox("Rejilla de fondo", &u.bgGrid); ImGui::SameLine(); ch |= ImGui::Checkbox("Pulsos de circuito", &u.bgPulses); ImGui::SameLine(); ch |= ImGui::Checkbox("Líneas de barrido (CRT)", &u.scanlines);
+    ImGui::SeparatorText("Ahorro de energía");
+    { const char* pm[] = {"Automático (solo en Raspberry Pi)", "Siempre activado", "Desactivado"}; ch |= ImGui::Combo("Modo", &u.powerMode, pm, 3); }
+    ImGui::TextDisabled(c.ui().lowPower ? "ACTIVO: se repinta solo al interactuar o ejecutar (máx. ~20 FPS), sin fondo animado." : "Inactivo: la ventana se repinta de forma continua (60 FPS) con animaciones.");
     ImGui::SeparatorText("Comportamiento");
     ch |= ImGui::Checkbox("Seguir la ejecución en el editor", &u.followExec); ImGui::SameLine(); ch |= ImGui::Checkbox("Mostrar FPS", &u.showFps);
     const char* fm[] = {"Hex", "Dec con signo", "Dec sin signo", "Binario"}; ch |= ImGui::Combo("Formato de registros", &u.regFormat, fm, 4);

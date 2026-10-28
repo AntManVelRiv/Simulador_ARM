@@ -13,6 +13,31 @@ Aplicación de escritorio nativa en C++ para ensamblar y ejecutar programas ARMv
 - **Mapa de memoria configurable**: puedes elegir en qué dirección empieza el código, los datos y la pila, precargar bloques de memoria arbitrarios y fijar valores iniciales de cualquier registro antes de ejecutar.
 - **Ventanas acoplables** (arrástralas, apílalas en pestañas, sepáralas en su propia ventana): Editor, Código máquina, Registros, Instrucción actual, Camino de datos, Memoria, Pila, Traza, Consola, Símbolos, Codificador, Mapa de memoria, Referencia — todas activables/desactivables desde el menú **Ver**, con la disposición restaurable a la de fábrica en cualquier momento.
 
+## Novedades
+
+- **`MUL`/`MLA`/`SMULL`...: `Rd` puede ser el mismo registro que `Rm`, `Rs` o `Rn`** (`MUL R1, R1, R2` ya ensambla). El
+  emulador lee los operandos antes de escribir el resultado. Siguen siendo errores: usar `PC` como operando y
+  `RdLo == RdHi` en las multiplicaciones largas (resultado impredecible incluso en ARM real).
+- **Abrir / Guardar con el administrador de archivos del sistema**: `Archivo → Abrir...` (Ctrl+O) muestra el diálogo nativo
+  (Windows: ventana estándar; macOS: Finder; Linux: `zenity`, `kdialog` o `yad`). Si no hay ninguno (p. ej. Raspberry Pi OS
+  sin `zenity`: `sudo apt install zenity`) se abre un **explorador interno**; también hay `Abrir con el explorador interno...`.
+  Además se puede **arrastrar un `.s` sobre la ventana** o pasarlo como argumento: `armsim programa.s`. La ruta tecleada
+  tolera comillas, espacios, `~` y `file://`, y los errores se explican (no existe, es una carpeta, sin permisos).
+- **Ahorro de energía (Raspberry Pi)**: la aplicación se repintaba 60 veces por segundo aunque no pasara nada. Ahora, en
+  una Raspberry Pi (detección automática) o con `--low-power` / `Personalizar → Ahorro de energía → Siempre activado`, la
+  ventana **duerme** hasta que hay entrada del usuario y, si el programa se ejecuta, se limita a ~20 FPS; además se
+  desactivan el fondo animado, los destellos y los fundidos. `--full-power` lo fuerza desactivado.
+- **Uso sin interfaz** (`armsim-cli`, o `armsim --run ...`).
+
+```bash
+cmake -B build -DARMSIM_BUILD_GUI=OFF && cmake --build build --target armsim-cli   # no necesita SDL ni OpenGL
+armsim-cli programa.s                          # ejecuta desde main (BL printf/scanf simulados)
+armsim-cli programa.s --input "12 30\n"        # entrada simulada para scanf
+armsim-cli rutinas.s --call reproduce --arg 3  # llama a una rutina como lo haría un main escrito en C; muestra R0
+armsim-cli programa.s --trace --regs --dump 0x2000,32
+armsim-cli --help
+```
+
 ## Descargar
 
 Ve a la pestaña **Actions** de este repositorio (o a **Releases** si se ha publicado una etiqueta `vX.Y.Z`) y descarga el paquete de tu sistema operativo, generados automáticamente por el flujo de compilación multiplataforma en `.github/workflows/build.yml`:
@@ -79,7 +104,7 @@ El ensamblador, el emulador, el modelo y el controlador no dependen de ninguna l
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target armsim_tests
-./build/armsim_tests     # 109 comprobaciones automáticas
+./build/armsim_tests     # ~200 comprobaciones automáticas
 ```
 
 ## Arquitectura del código (Modelo-Vista-Controlador)
@@ -90,6 +115,7 @@ src/
 │   ├── Arm.h/.cpp        ensamblador + emulador de CPU ARMv4
 │   ├── Settings.h/.cpp   preferencias, temas y su persistencia en disco
 │   ├── Examples.h/.cpp   programas de ejemplo incluidos
+│   ├── Runner.h/.cpp     ejecución sin interfaz (--call, entrada simulada...)
 │   └── SimModel.h/.cpp   estado completo de la simulación (fuente, programa, máquina, traza...)
 ├── controller/       CONTROLADOR — traduce acciones del usuario en cambios sobre el modelo
 │   └── SimController.h/.cpp
@@ -102,7 +128,7 @@ src/
 │   └── FontData.cpp        fuente JetBrains Mono incrustada en el binario
 └── main.cpp          raíz de composición: crea SDL/OpenGL/ImGui y arranca el bucle principal
 
-tests/tests.cpp       pruebas del modelo y del controlador (sin GUI): 109 comprobaciones
+tests/tests.cpp       pruebas del modelo y del controlador (sin GUI): ~200 comprobaciones
 third_party/          Dear ImGui (rama docking) e ImGuiColorTextEdit, vendorizados como fuente
 assets/fonts/         JetBrains Mono (licencia OFL, incluida)
 install-deps.sh       instala las dependencias en cualquier Linux (detecta apt/dnf/zypper/pacman/apk)
@@ -133,11 +159,11 @@ Las llamadas de lectura **detienen la ejecución** ("esperando entrada") hasta q
 
 ### `BL printf`, `BL scanf` y otras funciones de biblioteca
 
-Además de las llamadas `SWI` de arriba, el simulador reconoce `printf`, `scanf`, `puts`, `gets` y `strlen` como si existieran de verdad: no hace falta definirlas, `BL printf` resuelve solo y, al ejecutarse, simula el efecto real de la función (y vuelve igual que si hubiera hecho su propio `BX LR`) — útil para seguir al pie de la letra los ejercicios que llaman directamente a funciones de la biblioteca C en vez de usar `SWI`.
+Además de las llamadas `SWI` de arriba, el simulador reconoce `printf`, `scanf`, `puts`, `gets`, `strlen`, `putchar`, `getchar`, `atoi` y `exit` como si existieran de verdad: no hace falta definirlas, `BL printf` resuelve solo y, al ejecutarse, simula el efecto real de la función (y vuelve igual que si hubiera hecho su propio `BX LR`) — útil para seguir al pie de la letra los ejercicios que llaman directamente a funciones de la biblioteca C en vez de usar `SWI`.
 
 | Llamada | Efecto |
 |---|---|
-| `BL printf` | `R0` = formato, `R1`-`R3` = argumentos. Admite `%s %d %u %x %c %%`. Escribe por consola; `R0` ← caracteres escritos. |
+| `BL printf` | `R0` = formato, `R1`-`R3` = argumentos. Admite `%s %d %i %u %x %X %o %c %p %%` con anchura/relleno (`%5d`, `%03d`, `%-8s`); el 4.º argumento y siguientes se leen de la pila. Escribe por consola; `R0` ← caracteres escritos. |
 | `BL scanf` | `R0` = formato, `R1`-`R3` = punteros donde guardar lo leído (`%d %u %x %s %c`). Bloquea hasta tener una línea; `R0` ← nº de valores leídos. |
 | `BL puts` | `R0` = cadena a escribir; añade un salto de línea. |
 | `BL gets` | `R0` = buffer donde guardar la línea leída (sin límite de tamaño, como el `gets()` real). Bloquea hasta tener una línea. |

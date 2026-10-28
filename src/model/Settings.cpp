@@ -1,5 +1,6 @@
 // model/Settings.cpp
 #include "Settings.h"
+#include "platform/FileDialog.h"
 #include <fstream>
 #include <map>
 #include <cstdlib>
@@ -28,6 +29,17 @@ const char* panelTitle(PanelId id) { return TITLES[id]; }
 UiPrefs::UiPrefs() {
     for (int i = 0; i < P_COUNT; i++) show[i] = true;
     show[P_SETTINGS] = show[P_ABOUT] = show[P_REF] = show[P_MAP] = show[P_ENCODER] = show[P_SYMS] = false;
+    lowPower = resolveLowPower(powerMode);
+}
+
+static int g_powerOverride = -1;
+void setPowerOverride(int forced) { g_powerOverride = forced; }
+bool resolveLowPower(int mode) {
+    if (g_powerOverride == 0) return false;
+    if (g_powerOverride == 1) return true;
+    if (mode == 1) return true;
+    if (mode == 2) return false;
+    return platform::isRaspberryPi();
 }
 
 static std::string colStr(const Color& c) { char b[96]; std::snprintf(b, sizeof b, "%.4f,%.4f,%.4f,%.4f", c.r, c.g, c.b, c.a); return b; }
@@ -38,6 +50,7 @@ bool SettingsStore::save(const Settings& s, const std::string& path) {
     const UiPrefs& u = s.ui;
     f << "theme=" << u.theme << "\nfontScale=" << u.fontScale << "\nrounding=" << u.rounding << "\nglow=" << u.glow << "\nwindowAlpha=" << u.windowAlpha << "\n";
     f << "animations=" << u.animations << "\nanimSpeed=" << u.animSpeed << "\nbgGrid=" << u.bgGrid << "\nbgPulses=" << u.bgPulses << "\nscanlines=" << u.scanlines << "\nfollowExec=" << u.followExec << "\nshowFps=" << u.showFps << "\n";
+    f << "powerMode=" << u.powerMode << "\n";
     f << "regFormat=" << u.regFormat << "\nmemCols=" << u.memCols << "\nmemAscii=" << u.memAscii << "\n";
     f << "stepsPerSec=" << s.sim.stepsPerSec << "\ntextBase=" << s.sim.opt.textBase << "\ndataBase=" << s.sim.opt.dataBase << "\nstackTop=" << s.sim.opt.stackTop << "\nlastFile=" << s.lastFile << "\n";
     const char* n[8] = {"bg","panel","accent","accent2","text","good","warn","bad"};
@@ -58,6 +71,7 @@ bool SettingsStore::load(Settings& s, const std::string& path) {
     u.theme = gi("theme", 0); u.fontScale = gf("fontScale", 1); u.rounding = gf("rounding", 6); u.glow = gf("glow", 0.6f); u.windowAlpha = gf("windowAlpha", 0.9f);
     u.animations = gi("animations", 1); u.animSpeed = gf("animSpeed", 1); u.bgGrid = gi("bgGrid", 1); u.bgPulses = gi("bgPulses", 1);
     u.scanlines = gi("scanlines", 0); u.followExec = gi("followExec", 1); u.showFps = gi("showFps", 0);
+    u.powerMode = gi("powerMode", 0); u.lowPower = resolveLowPower(u.powerMode);
     u.regFormat = gi("regFormat", 0); u.memCols = gi("memCols", 16); u.memAscii = gi("memAscii", 1);
     s.sim.stepsPerSec = gf("stepsPerSec", 30); s.sim.opt.textBase = gu("textBase", arm::TEXT_BASE); s.sim.opt.dataBase = gu("dataBase", arm::DATA_BASE); s.sim.opt.stackTop = gu("stackTop", arm::STACK_TOP);
     if (kv.count("lastFile")) s.lastFile = kv["lastFile"];

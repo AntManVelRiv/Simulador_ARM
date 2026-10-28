@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 
+// Limpia una ruta escrita/pegada por el usuario (comillas, espacios, ~, file://)
+std::string normalizeUserPath(std::string p);
+
 enum class StatusKind { Normal, Ok, Error, Warning };
 struct Status { std::string text = "Listo"; StatusKind kind = StatusKind::Normal; };
 
@@ -53,7 +56,7 @@ public:
     void provideInput(const std::string& text);   // el usuario escribe algo en la consola
     void setStatus(const std::string& t, StatusKind k) { status_ = {t, k}; }
     void setCurrentFile(const std::string& f) { settings_.lastFile = f; }
-    void applySettings(const Settings& s) { settings_ = s; settingsRev_++; }
+    void applySettings(const Settings& s) { settings_ = s; settings_.ui.lowPower = resolveLowPower(settings_.ui.powerMode); settingsRev_++; }
     Settings& settingsRef() { return settings_; }
     void touchSettings() { settingsRev_++; }
 

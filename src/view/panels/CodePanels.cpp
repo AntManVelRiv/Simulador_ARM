@@ -126,7 +126,7 @@ void ListingPanel::content(ViewContext& c) {
             bool isPC = l.isInstr && l.addr == mach->pc && !mach->halted;
             bool isLast = last && l.addr == last->addr;
             bool bp = l.isInstr && std::find(m.breakpoints().begin(), m.breakpoints().end(), l.line) != m.breakpoints().end();
-            if (isPC) { float a = ui.animations ? 0.25f + 0.10f * std::sin((float)ImGui::GetTime() * 5) : 0.3f; ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, U32(withA(p.good, a))); if (follow) ImGui::SetScrollHereY(0.5f); }
+            if (isPC) { float a = ui.anim() ? 0.25f + 0.10f * std::sin((float)ImGui::GetTime() * 5) : 0.3f; ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, U32(withA(p.good, a))); if (follow) ImGui::SetScrollHereY(0.5f); }
             else if (isLast) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, U32(withA(p.accent, 0.15f)));
             ImGui::TableNextColumn(); ImGui::PushID((int)l.addr);
             if (l.isInstr) {
@@ -184,7 +184,7 @@ void DatapathPanel::content(ViewContext& c) {
     std::set<std::string> hot; std::vector<std::pair<std::string, std::string>> arrows;
     const float T = 0.6f; std::string stageName = "En reposo";
     const StepRecord* last = m.lastStep();
-    if (last && ui.animations && c.vs.stageT < 1e8f) {
+    if (last && ui.anim() && c.vs.stageT < 1e8f) {
         int stage = (int)(c.vs.stageT / T); float frac = std::fmod(c.vs.stageT, T) / T; (void)frac;
         auto t = last->ins.t; bool ex = last->executed;
         if (stage == 0) { hot = {"PC","IM","IR"}; arrows = {{"PC","IM"},{"IM","IR"}}; stageName = "1. Búsqueda (fetch): PC -> memoria -> IR"; }

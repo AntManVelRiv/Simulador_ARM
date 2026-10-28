@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <functional>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 namespace arm {
 
@@ -87,7 +89,7 @@ int parseReg(const std::string& sIn) {
 // ============================================================================
 // Funciones de biblioteca simuladas (printf, scanf, puts, gets, strlen)
 // ============================================================================
-const std::vector<std::string> LIB_FUNC_NAMES = {"printf", "scanf", "puts", "gets", "strlen"};
+const std::vector<std::string> LIB_FUNC_NAMES = {"printf", "scanf", "puts", "gets", "strlen", "putchar", "getchar", "atoi", "exit"};
 const char* libraryFunctionName(uint32_t addr) {
     if (addr < LIB_BASE) return nullptr;
     uint32_t idx = (addr - LIB_BASE) / 4;
@@ -854,7 +856,44 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                 std::string rest = sp==std::string::npos? "" : trim(text.substr(sp+1));
                 if (dir==".TEXT") { sec="text"; }
                 else if (dir==".DATA" || dir==".BSS") { sec="data"; }
-                else if (dir==".GLOBAL" || dir==".GLOBL" || dir==".EXTERN" || dir==".ALIGN" || dir==".SYNTAX" || dir==".CODE" || dir==".ARM" || dir==".THUMB") { }
+                else if (dir==".SECTION") {
+                    // .section .text / .data / .rodata / .bss (con o sin flags): .text -> codigo; el resto -> datos
+                    std::string nm = upper(trim(splitTop(rest).empty() ? std::string() : splitTop(rest)[0]));
+                    sec = (nm.rfind(".TEXT",0)==0 || nm==".INIT" || nm==".FINI") ? "text" : "data";
+                }
+                else if (dir==".GLOBAL" || dir==".GLOBL" || dir==".EXTERN" || dir==".SYNTAX" || dir==".CODE" || dir==".ARM" || dir==".THUMB"
+                         || dir==".TYPE" || dir==".SIZE" || dir==".FUNC" || dir==".ENDFUNC" || dir==".FNSTART" || dir==".FNEND" || dir==".ARCH" || dir==".CPU"
+                         || dir==".FPU" || dir==".FILE" || dir==".IDENT" || dir==".EABI_ATTRIBUTE" || dir==".LTORG" || dir==".POOL" || dir==".WEAK"
+                         || dir==".HIDDEN" || dir==".LOCAL" || dir==".THUMB_FUNC" || dir==".CFI_STARTPROC" || dir==".CFI_ENDPROC") { }
+                else if (dir==".ALIGN" || dir==".BALIGN" || dir==".P2ALIGN") {
+                    // En ARM de GNU as, .align N alinea a 2^N bytes; .balign N, a N bytes. Solo importa en datos
+                    // (las instrucciones ya van alineadas a 4).
+                    if (sec=="data") {
+                        auto parts = splitTop(rest);
+                        long long n = parts.empty() ? (dir==".BALIGN" ? 4 : 2) : (long long)evalExpr(parts[0], symTmp, opt.dataBase+dOff);
+                        long long a = (dir==".BALIGN") ? n : (n >= 0 && n < 16 ? (1LL << n) : 0);
+                        if (a > 1 && a <= 4096) {
+                            uint32_t pad = (uint32_t)((a - (dOff % a)) % a);
+                            if (pad) { RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="space"; it.spaceLen=(int)pad; it.addr=opt.dataBase+dOff; items.push_back(it); dOff += pad; }
+                        }
+                    }
+                }
+                else if (dir==".HWORD" || dir==".SHORT" || dir==".2BYTE") {
+                    auto parts = splitTop(rest); if (parts.empty()) throw AsmException(dir+" espera al menos un valor");
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="half"; it.values=parts; it.addr = opt.dataBase+dOff;
+                    items.push_back(it); dOff += 2*(uint32_t)parts.size();
+                }
+                else if (dir==".COMM" || dir==".LCOMM") {
+                    // .comm nombre, tamaño[, alineacion]: reserva memoria inicializada a 0 en la zona de datos
+                    auto parts = splitTop(rest);
+                    if (parts.size()<2) throw AsmException(dir+" espera: nombre, tamaño");
+                    std::string savedSec = sec; sec = "data";
+                    if (parts.size()>=3) { long long a = (long long)evalExpr(parts[2], symTmp, 0); if (a>1 && a<=4096) dOff += (uint32_t)((a - (dOff % a)) % a); }
+                    defineLabel(parts[0], rl.lineNo);
+                    int n = (int)evalExpr(parts[1], symTmp, opt.dataBase+dOff);
+                    RawItem it; it.line=rl.lineNo; it.section="data"; it.kind="space"; it.spaceLen=n; it.addr=opt.dataBase+dOff;
+                    items.push_back(it); dOff += (uint32_t)n; sec = savedSec;
+                }
                 else if (dir==".EQU" || dir==".SET") {
                     auto parts = splitTop(rest);
                     if (parts.size()<2) throw AsmException(dir+" espera un nombre y un valor: .equ NOMBRE, valor");
@@ -936,6 +975,7 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
     for (auto& it : items) {
         if (it.kind=="word") { uint32_t a=it.addr; for (auto& expr : it.values) { uint32_t v; try { v = evalExpr(expr, symTmp, a);} catch(AsmException&e){ err(it.line,e); v=0;} for(int b=0;b<4;b++) prog.initialMem[a+b] = (uint8_t)((v>>(8*b))&0xFF); a+=4; } }
         else if (it.kind=="byte") { uint32_t a=it.addr; for (auto& expr : it.values) { uint32_t v; try { v = evalExpr(expr, symTmp, a);} catch(AsmException&e){ err(it.line,e); v=0;} prog.initialMem[a]=(uint8_t)(v&0xFF); a+=1; } }
+        else if (it.kind=="half") { uint32_t a=it.addr; for (auto& expr : it.values) { uint32_t v; try { v = evalExpr(expr, symTmp, a);} catch(AsmException&e){ err(it.line,e); v=0;} prog.initialMem[a]=(uint8_t)(v&0xFF); prog.initialMem[a+1]=(uint8_t)((v>>8)&0xFF); a+=2; } }
         else if (it.kind=="ascii") { uint32_t a=it.addr; for (char c : it.values[0]) prog.initialMem[a++] = (uint8_t)c; }
         else if (it.kind=="space") { for (int i=0;i<it.spaceLen;i++) prog.initialMem[it.addr+i] = 0; }
     }
@@ -990,13 +1030,19 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                     ins.rd=parseReg(toks[0]); ins.rm=parseReg(toks[1]); ins.rs=parseReg(toks[2]);
                     if (mla) ins.rn = parseReg(toks[3]);
                     if (ins.rd<0||ins.rm<0||ins.rs<0||(mla&&ins.rn<0)) throw AsmException("Se esperaba un registro");
-                    if (ins.rd==ins.rm) throw AsmException("En "+pm.base+", Rd y Rm no pueden ser el mismo registro");
+                    // Rd == Rm (o Rd == Rs, Rd == Rn) es valido: el emulador lee los operandos antes de escribir
+                    // el resultado y las versiones modernas de ARM (v6+) lo permiten. Solo PC esta prohibido.
+                    if (ins.rd==15||ins.rm==15||ins.rs==15||(mla&&ins.rn==15)) throw AsmException("En "+pm.base+" no se puede usar PC (R15) como operando");
                     encodeMul(ins);
                 } else if (pm.kind=="mull") {
                     if (toks.size()<4) throw AsmException(pm.base+" espera RdLo, RdHi, Rm, Rs");
                     ins.mnemonic=pm.base; ins.s=pm.s; ins.t = IType::MULL;
                     ins.rdLo=parseReg(toks[0]); ins.rdHi=parseReg(toks[1]); ins.rm=parseReg(toks[2]); ins.rs=parseReg(toks[3]);
                     if (ins.rdLo<0||ins.rdHi<0||ins.rm<0||ins.rs<0) throw AsmException("Se esperaba un registro");
+                    // RdLo y RdHi deben ser registros distintos (con el mismo registro el resultado seria impredecible),
+                    // pero RdLo/RdHi SI pueden coincidir con Rm o Rs: los operandos se leen antes de escribir.
+                    if (ins.rdLo==ins.rdHi) throw AsmException("En "+pm.base+", RdLo y RdHi deben ser registros distintos");
+                    if (ins.rdLo==15||ins.rdHi==15||ins.rm==15||ins.rs==15) throw AsmException("En "+pm.base+" no se puede usar PC (R15) como operando");
                     encodeMull(ins);
                 } else if (pm.kind=="mem") {
                     if (toks.size()<2) throw AsmException(pm.base+" espera Rd, [operando de memoria]");
@@ -1127,6 +1173,9 @@ void Machine::reset() {
     r.fill(0);
     r[13] = prog_.opt.stackTop;
     pc = prog_.textStart;
+    // Como en un ejecutable real (ld/gcc), la ejecucion empieza en "main" si el programa la define:
+    // asi se pueden escribir subrutinas (p. ej. "reproduce") ANTES de main en el fichero.
+    { auto m = prog_.symbols.find("main"); if (m != prog_.symbols.end() && prog_.byAddr.count(m->second)) pc = m->second; }
     f = Flags{};
     halted = false; haltReason.clear(); haltKind.clear();
     steps = 0; output.clear(); lastWasLibraryCall = false;
@@ -1203,28 +1252,62 @@ std::string Machine::readCString(uint32_t addr, size_t maxLen) const {
 // argumentos en R0..R3; printf/scanf usan R0 como formato y R1..R3 como argumentos).
 void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
     lastWasLibraryCall = true;
-    if (fn == "printf") {
+    if (fn == "printf" || fn == "putchar" || fn == "exit" || fn == "atoi" || fn == "getchar") {
+        if (fn == "putchar") {
+            output += (char)(r[0] & 0xFF);
+            rec.sym = "putchar(" + std::to_string(r[0] & 0xFF) + ")";
+            rec.text = "Escribe el caracter de R0 por consola; devuelve ese mismo caracter en R0.";
+            r[0] &= 0xFF;
+            return;
+        }
+        if (fn == "getchar") {
+            char c = takeChar(); uint32_t old = r[0]; r[0] = (uint8_t)c; rec.regs.push_back({0, old, r[0]});
+            rec.sym = "getchar()"; rec.text = "Lee un caracter de la consola y lo devuelve en R0.";
+            return;
+        }
+        if (fn == "atoi") {
+            std::string s = readCString(r[0]); uint32_t old = r[0]; r[0] = (uint32_t)(int32_t)std::atoi(s.c_str()); rec.regs.push_back({0, old, r[0]});
+            rec.sym = "atoi(\"" + s + "\")"; rec.text = "Convierte la cadena apuntada por R0 a entero (devuelto en R0).";
+            return;
+        }
+        if (fn == "exit") {
+            exitCode = r[0]; halt("El programa ha terminado con exit(" + std::to_string((int32_t)r[0]) + ").", "exit");
+            rec.sym = "exit(R0)"; rec.text = "Termina el programa."; return;
+        }
+        // printf: argumentos en R1-R3 y, a partir del cuarto, en la pila (convenio AAPCS)
         std::string fmt = readCString(r[0]);
-        int argi = 1; std::string outp;
+        int argi = 1;
+        auto nextArg = [&]() -> uint32_t { uint32_t v = (argi <= 3) ? r[argi] : readWord(r[13] + 4u * (uint32_t)(argi - 4)); argi++; return v; };
+        std::string outp;
         for (size_t i = 0; i < fmt.size(); i++) {
-            if (fmt[i] == '%' && i + 1 < fmt.size()) {
-                char c = fmt[++i]; uint32_t av = (argi <= 3) ? r[argi] : 0;
-                switch (c) {
-                    case 's': outp += readCString(av); argi++; break;
-                    case 'd': outp += std::to_string((int32_t)av); argi++; break;
-                    case 'u': outp += std::to_string(av); argi++; break;
-                    case 'x': outp += hex(av); argi++; break;
-                    case 'c': outp += (char)(av & 0xFF); argi++; break;
-                    case '%': outp += '%'; break;
-                    default: outp += '%'; outp += c; break;
-                }
-            } else outp += fmt[i];
+            if (fmt[i] != '%' || i + 1 >= fmt.size()) { outp += fmt[i]; continue; }
+            size_t j = i + 1; std::string flags, width, prec; bool hasPrec = false;
+            while (j < fmt.size() && std::strchr("-+ 0#", fmt[j])) flags += fmt[j++];
+            while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) width += fmt[j++];
+            if (j < fmt.size() && fmt[j] == '.') { hasPrec = true; j++; while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) prec += fmt[j++]; }
+            while (j < fmt.size() && std::strchr("hlzjt", fmt[j])) j++;      // modificadores de longitud: todo es de 32 bits
+            if (j >= fmt.size()) { outp += fmt.substr(i); break; }
+            char c = fmt[j]; std::string spec = "%" + flags + width + (hasPrec ? "." + (prec.empty() ? std::string("0") : prec) : std::string());
+            char buf[512]; buf[0] = 0;
+            switch (c) {
+                case 'd': case 'i': std::snprintf(buf, sizeof buf, (spec + "d").c_str(), (int)(int32_t)nextArg()); outp += buf; break;
+                case 'u': std::snprintf(buf, sizeof buf, (spec + "u").c_str(), (unsigned)nextArg()); outp += buf; break;
+                case 'x': std::snprintf(buf, sizeof buf, (spec + "x").c_str(), (unsigned)nextArg()); outp += buf; break;
+                case 'X': std::snprintf(buf, sizeof buf, (spec + "X").c_str(), (unsigned)nextArg()); outp += buf; break;
+                case 'o': std::snprintf(buf, sizeof buf, (spec + "o").c_str(), (unsigned)nextArg()); outp += buf; break;
+                case 'p': std::snprintf(buf, sizeof buf, "0x%x", (unsigned)nextArg()); outp += buf; break;
+                case 'c': std::snprintf(buf, sizeof buf, (spec + "c").c_str(), (int)(nextArg() & 0xFF)); outp += buf; break;
+                case 's': { std::string sv = readCString(nextArg()); std::snprintf(buf, sizeof buf, (spec + "s").c_str(), sv.substr(0, 400).c_str()); outp += buf; break; }
+                case '%': outp += '%'; break;
+                default: outp += fmt.substr(i, j - i + 1); break;
+            }
+            i = j;
         }
         output += outp;
         uint32_t old = r[0]; r[0] = (uint32_t)outp.size(); rec.regs.push_back({0, old, r[0]});
         rec.sym = "printf(\"" + fmt + "\", ...)";
         rec.num = "escribe " + std::to_string(outp.size()) + " caracteres";
-        rec.text = "Llama a printf: interpreta el formato de R0 y los argumentos de R1-R3 (%s, %d, %u, %x, %c, %%), y escribe el resultado por consola.";
+        rec.text = "Llama a printf: interpreta el formato de R0 y los argumentos de R1-R3 (y de la pila a partir del cuarto): %d %i %u %x %X %o %c %s %p %% con anchura/relleno (%5d, %02x, %-8s...), y escribe el resultado por consola.";
     } else if (fn == "scanf") {
         std::string fmt = readCString(r[0]);
         std::string line = takeLine();
@@ -1283,6 +1366,10 @@ std::optional<StepRecord> Machine::step() {
     if (ins.t == IType::BR && condPass(ins.cond, f)) {
         uint32_t tgt = (uint32_t)((int32_t)(pc + 8) + ins.branchOffsetWords * 4);
         const char* fn = libraryFunctionName(tgt);
+        if (fn && std::string(fn) == "getchar" && !hasPendingChar()) {
+            halt("Esperando un caracter de entrada para getchar(). Escribelo en la consola.", "input");
+            return std::nullopt;
+        }
         if (fn && (std::string(fn) == "scanf" || std::string(fn) == "gets") && !hasPendingLine()) {
             halt("Esperando una linea de entrada para " + std::string(fn) + "(). Escribela en la consola y pulsa Enter.", "input");
             return std::nullopt;
@@ -1493,12 +1580,14 @@ std::optional<StepRecord> Machine::step() {
     pc = nextPc;
     steps++;
 
-    snap.after = rec;
-    history.push_back(std::move(snap));
-    if ((long)history.size() > 500) history.pop_front();
+    if (keepHistory) {
+        snap.after = rec;
+        history.push_back(std::move(snap));
+        if ((long)history.size() > 500) history.pop_front();
+    }
 
     if (!halted) {
-        if (steps >= MAX_STEPS) halt("Limite de " + std::to_string(MAX_STEPS) + " instrucciones alcanzado (bucle infinito?).", "limit");
+        if (steps >= stepLimit) halt("Limite de " + std::to_string(stepLimit) + " instrucciones alcanzado (bucle infinito?).", "limit");
         else if (prog_.byAddr.find(pc) == prog_.byAddr.end()) {
             if (pc >= prog_.textEnd) halt("El programa ha llegado al final del codigo.", "end");
             // Patron habitual en los apuntes: "main" termina con POP+BX LR sin que

@@ -183,6 +183,9 @@ public:
     std::string haltReason;
     std::string haltKind;           // "exit" | "error" | "limit" | "end"
     long steps = 0;
+    long stepLimit = MAX_STEPS;     // tope de instrucciones antes de declarar "bucle infinito" (ajustable, p. ej. --max-steps)
+    bool keepHistory = true;        // false = no guardar el historial de "paso atras" (ejecucion sin interfaz: mas rapido y menos memoria)
+    uint32_t exitCode = 0;          // valor pasado a exit() / R0 al terminar
 
     std::string output;             // salida generada por las llamadas SWI de escritura
 

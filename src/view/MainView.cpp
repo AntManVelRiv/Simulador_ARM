@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 using namespace arm;
 
@@ -46,14 +47,14 @@ void MainView::drawBackground() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImVec2 p0 = ImGui::GetMainViewport()->Pos, sz = ImGui::GetMainViewport()->Size;
     dl->AddRectFilledMultiColor(p0, ImVec2(p0.x + sz.x, p0.y + sz.y), U32(c.bg), U32(c.bg), U32(mixc(c.bg, c.accent, 0.10f)), U32(mixc(c.bg, c.accent2, 0.06f)));
-    double t = ui.animations ? ImGui::GetTime() * ui.animSpeed : 0.0;
+    double t = ui.anim() ? ImGui::GetTime() * ui.animSpeed : 0.0;
     if (ui.bgGrid) {
         float step = 48.0f * ui.fontScale; ImU32 gc = U32(withA(c.accent, 0.07f));
         float off = std::fmod((float)t * 6.0f, step);
         for (float x = p0.x - off; x < p0.x + sz.x; x += step) dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p0.y + sz.y), gc);
         for (float y = p0.y + off; y < p0.y + sz.y; y += step) dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + sz.x, y), gc);
     }
-    if (ui.bgPulses) {   // "trazas de circuito" con pulsos de luz que las recorren
+    if (ui.bgPulses && !ui.lowPower) {   // "trazas de circuito" con pulsos de luz que las recorren
         for (int i = 0; i < 14; i++) {
             unsigned h = (unsigned)(i * 2654435761u);
             float y0 = p0.y + sz.y * (0.06f + 0.9f * ((h >> 3) % 1000) / 1000.0f);
@@ -72,13 +73,13 @@ void MainView::drawBackground() {
             dl->AddCircleFilled(pp, 3.2f, U32(withA(pc, 0.85f))); dl->AddCircleFilled(pp, 9.0f, U32(withA(pc, 0.10f)));
         }
     }
-    if (ui.scanlines) { ImU32 sc = U32(ImVec4(0, 0, 0, 0.10f)); for (float y = p0.y; y < p0.y + sz.y; y += 3.0f) dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + sz.x, y), sc); }
+    if (ui.scanlines && !ui.lowPower) { ImU32 sc = U32(ImVec4(0, 0, 0, 0.10f)); for (float y = p0.y; y < p0.y + sz.y; y += 3.0f) dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + sz.x, y), sc); }
 }
 
 void MainView::drawBootOverlay() {
     const UiPrefs& ui = model_.settings().ui; Pal c(ui.col);
     double t = ImGui::GetTime() - vs_.bootTime;
-    if (!ui.animations || t > 1.6) return;
+    if (!ui.anim() || t > 1.6) return;
     float a = t < 1.0 ? 1.0f : (float)(1.6 - t) / 0.6f;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     ImVec2 p0 = ImGui::GetMainViewport()->Pos, sz = ImGui::GetMainViewport()->Size;
@@ -102,6 +103,7 @@ void MainView::mainMenu() {
     if (ImGui::BeginMenu("Archivo")) {
         if (ImGui::MenuItem("Nuevo")) ctrl_.newProgram();
         if (ImGui::MenuItem("Abrir...", "Ctrl+O")) vs_.openFileDlg = true;
+        if (ImGui::MenuItem("Abrir con el explorador interno...")) { vs_.fileError.clear(); vs_.browser.open(false, st.lastFile); }
         if (ImGui::MenuItem("Guardar", "Ctrl+S")) { if (st.lastFile.empty()) vs_.saveFileDlg = true; else ctrl_.saveFile(st.lastFile); }
         if (ImGui::MenuItem("Guardar como...")) vs_.saveFileDlg = true;
         ImGui::Separator();
@@ -172,7 +174,7 @@ void MainView::toolbar() {
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     const Status& s = model_.status();
     ImVec4 sc = s.kind == StatusKind::Error ? c.bad : s.kind == StatusKind::Ok ? c.good : s.kind == StatusKind::Warning ? c.warn : c.text;
-    if (model_.running() && ui.animations) sc.w = 0.6f + 0.4f * std::sin((float)ImGui::GetTime() * 6.0f);
+    if (model_.running() && ui.anim()) sc.w = 0.6f + 0.4f * std::sin((float)ImGui::GetTime() * 6.0f);
     ImGui::TextColored(sc, "%s", s.text.c_str());
     if (ui.showFps) { ImGui::SameLine(ImGui::GetWindowWidth() - 90); ImGui::TextDisabled("%.0f FPS", vs_.fps); }
     ImGui::End(); ImGui::PopStyleVar();
@@ -192,24 +194,51 @@ void MainView::handleInput() {
     if (ImGui::IsKeyPressed(ImGuiKey_Minus) && io.KeyCtrl) { Settings s = st; s.ui.fontScale = std::max(0.6f, s.ui.fontScale - 0.1f); ctrl_.updateSettings(s); }
 }
 
+// Abrir/Guardar: se usa el administrador de archivos del sistema (diálogo nativo, en un hilo para no congelar la
+// ventana). Si el sistema no tiene ninguno, se muestra el explorador interno. Siempre se puede teclear la ruta.
+void MainView::startFileDialog(bool save) {
+    const Settings& st = model_.settings();
+    std::string start = st.lastFile.empty() ? (save ? std::string("programa.s") : std::string()) : st.lastFile;
+    vs_.fileError.clear();
+    if (platform::nativeFileDialogAvailable()) {
+        vs_.nativeBusy = true; vs_.nativeSave = save;
+        vs_.nativeJob = std::async(std::launch::async, [save, start]() {
+            std::string chosen; platform::DialogResult r = platform::nativeFileDialog(save, start, chosen);
+            return std::make_pair(r, chosen);
+        });
+    } else vs_.browser.open(save, start);
+}
+
+void MainView::finishFileChoice(bool save, const std::string& pathIn) {
+    std::string path = pathIn;
+    bool ok = save ? ctrl_.saveFile(path) : ctrl_.openFile(path);
+    if (!ok) { vs_.fileError = model_.status().text; vs_.browser.open(save, path); vs_.browser.reopen(); }
+}
+
 void MainView::fileDialogs() {
     const Settings& st = model_.settings();
-    if (vs_.openFileDlg) { ImGui::OpenPopup("Abrir programa"); vs_.openFileDlg = false; std::snprintf(vs_.filePath, sizeof vs_.filePath, "%s", st.lastFile.c_str()); }
-    if (vs_.saveFileDlg) { ImGui::OpenPopup("Guardar programa"); vs_.saveFileDlg = false; std::snprintf(vs_.filePath, sizeof vs_.filePath, "%s", st.lastFile.empty() ? "programa.s" : st.lastFile.c_str()); }
-    if (ImGui::BeginPopupModal("Abrir programa", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("Ruta del archivo de ensamblador (.s / .asm / .txt):");
-        ImGui::SetNextItemWidth(520 * st.ui.fontScale); ImGui::InputText("##p", vs_.filePath, sizeof vs_.filePath);
-        if (ImGui::Button("Abrir") && ctrl_.openFile(vs_.filePath)) ImGui::CloseCurrentPopup();
-        ImGui::SameLine(); if (ImGui::Button("Cancelar")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+    if (vs_.openFileDlg) { vs_.openFileDlg = false; if (!vs_.nativeBusy) startFileDialog(false); }
+    if (vs_.saveFileDlg) { vs_.saveFileDlg = false; if (!vs_.nativeBusy) startFileDialog(true); }
+
+    // resultado del diálogo nativo
+    if (vs_.nativeBusy && vs_.nativeJob.valid() && vs_.nativeJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto res = vs_.nativeJob.get(); vs_.nativeBusy = false;
+        if (res.first == platform::DialogResult::Chosen) finishFileChoice(vs_.nativeSave, res.second);
+        else if (res.first == platform::DialogResult::Unavailable) vs_.browser.open(vs_.nativeSave, st.lastFile);
     }
-    if (ImGui::BeginPopupModal("Guardar programa", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("Ruta donde guardar el programa:");
-        ImGui::SetNextItemWidth(520 * st.ui.fontScale); ImGui::InputText("##p2", vs_.filePath, sizeof vs_.filePath);
-        if (ImGui::Button("Guardar") && ctrl_.saveFile(vs_.filePath)) ImGui::CloseCurrentPopup();
-        ImGui::SameLine(); if (ImGui::Button("Cancelar")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+    if (vs_.nativeBusy) {   // aviso discreto mientras el diálogo del sistema está abierto
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 60), ImGuiCond_Always, ImVec2(0.5f, 0));
+        ImGui::SetNextWindowBgAlpha(0.92f);
+        ImGui::Begin("##waitdlg", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+        ImGui::Text("Esperando al selector de archivos del sistema...");
+        if (ImGui::Button("Usar el explorador interno")) { vs_.nativeJob = {}; vs_.nativeBusy = false; vs_.browser.open(vs_.nativeSave, st.lastFile); }
+        ImGui::End();
     }
+
+    // explorador interno
+    std::string chosen;
+    if (vs_.browser.draw(st.ui.fontScale, chosen, vs_.fileError)) finishFileChoice(vs_.browser.isSave(), chosen);
 }
 
 // --------------------------------------- Fotograma --------------------------------------
@@ -218,7 +247,7 @@ void MainView::frame(float dt) {
     vs_.fps += (ImGui::GetIO().Framerate - vs_.fps) * 0.05f;
     ctrl_.tick(dt);                       // el controlador avanza la ejecución continua
     vs_.sync(model_, dt);                 // la vista detecta cambios del modelo para animar
-    if (model_.settings().ui.followExec && model_.stepSerial() == vs_.seenStepSerial && vs_.stageT < 0.05f && model_.machine()) {
+    if (model_.settings().ui.followExec && model_.stepSerial() == vs_.seenStepSerial && (vs_.stageT < 0.05f || vs_.stepped) && model_.machine()) {
         auto it = model_.program().byAddr.find(model_.machine()->pc);
         if (it != model_.program().byAddr.end()) vs_.editorJumpLine = it->second.line - 1;
     }

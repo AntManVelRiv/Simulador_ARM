@@ -10,14 +10,25 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(ARMSIM_BUILD_TESTS "Compilar las pruebas del modelo/controlador (sin interfaz gráfica)" ON)
+option(ARMSIM_BUILD_GUI   "Compilar la interfaz gráfica (necesita SDL2 y OpenGL). Con OFF solo se construye armsim-cli (sin interfaz)" ON)
 
 # ------------------------------- Dependencias -------------------------------
-find_package(SDL2 REQUIRED)
-find_package(OpenGL REQUIRED)
+find_package(Threads REQUIRED)
+set(ARMSIM_GUI_AVAILABLE FALSE)
+if(ARMSIM_BUILD_GUI)
+  find_package(SDL2)
+  find_package(OpenGL)
+  if(SDL2_FOUND AND OpenGL_FOUND)
+    set(ARMSIM_GUI_AVAILABLE TRUE)
+  else()
+    message(WARNING "SDL2/OpenGL no encontrados: se construye SOLO la version sin interfaz (armsim-cli). Instala SDL2 (install-deps.sh) para la GUI.")
+  endif()
+endif()
 
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 set(TEDIT_DIR ${CMAKE_SOURCE_DIR}/third_party/ImGuiColorTextEdit)
 
+if(ARMSIM_GUI_AVAILABLE)
 add_library(imgui STATIC
   ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_widgets.cpp
   ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_demo.cpp
@@ -39,24 +50,46 @@ endif()
 add_library(texteditor STATIC ${TEDIT_DIR}/TextEditor.cpp)
 target_include_directories(texteditor PUBLIC ${TEDIT_DIR})
 target_link_libraries(texteditor PUBLIC imgui)
+endif()
 
 # ---------------------------------- Modelo -----------------------------------
 add_library(armsim_model STATIC
   src/model/Arm.cpp
+  src/model/Runner.cpp
   src/model/Settings.cpp
   src/model/Examples.cpp
   src/model/SimModel.cpp
+  src/platform/FileDialog.cpp
 )
 target_include_directories(armsim_model PUBLIC src)
+target_link_libraries(armsim_model PUBLIC Threads::Threads)
+if(WIN32)
+  target_link_libraries(armsim_model PUBLIC comdlg32)
+endif()
+
+# ------------------------- Modo sin interfaz (CLI) ---------------------------
+# Sin SDL, OpenGL ni ImGui: se puede compilar en cualquier máquina (también sin Raspberry Pi).
+add_library(armsim_cli STATIC src/cli/Cli.cpp)
+target_link_libraries(armsim_cli PUBLIC armsim_model)
+add_executable(armsim-cli src/cli/main_cli.cpp)
+target_link_libraries(armsim-cli PRIVATE armsim_cli)
+if(MSVC)
+  target_compile_options(armsim-cli PRIVATE /utf-8)
+  target_compile_options(armsim_cli PRIVATE /utf-8)
+  target_compile_options(armsim_model PRIVATE /utf-8)
+endif()
+install(TARGETS armsim-cli RUNTIME DESTINATION .)
 
 # -------------------------------- Controlador ---------------------------------
 add_library(armsim_controller STATIC src/controller/SimController.cpp)
 target_link_libraries(armsim_controller PUBLIC armsim_model)
 
+if(ARMSIM_GUI_AVAILABLE)
 # ----------------------------------- Vista ------------------------------------
 add_library(armsim_view STATIC
   src/view/Theme.cpp
   src/view/Panel.cpp
+  src/view/FileBrowser.cpp
   src/view/MainView.cpp
   src/view/FontData.cpp
   src/view/panels/CodePanels.cpp
@@ -92,7 +125,7 @@ if(ARMSIM_USE_WIN32_SUBSYSTEM)
 else()
   add_executable(armsim src/main.cpp)
 endif()
-target_link_libraries(armsim PRIVATE armsim_view)
+target_link_libraries(armsim PRIVATE armsim_view armsim_cli)
 if(ARMSIM_USE_WIN32_SUBSYSTEM)
   target_link_libraries(armsim PRIVATE SDL2::SDL2main)
 endif()
@@ -107,6 +140,7 @@ if(MSVC)
 endif()
 
 install(TARGETS armsim RUNTIME DESTINATION .)
+endif()
 
 # ------------------------------------ Pruebas -----------------------------------
 if(ARMSIM_BUILD_TESTS)
@@ -114,4 +148,15 @@ if(ARMSIM_BUILD_TESTS)
   add_executable(armsim_tests tests/tests.cpp)
   target_link_libraries(armsim_tests PRIVATE armsim_controller)
   add_test(NAME model_controller_tests COMMAND armsim_tests)
+endif()
+
+# Compatibilidad con std::filesystem en GCC 8
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(armsim_model PUBLIC stdc++fs)
+    target_link_libraries(armsim_tests PRIVATE stdc++fs)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(armsim_cli PUBLIC stdc++fs)
 endif()

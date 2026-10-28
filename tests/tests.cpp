@@ -2,6 +2,8 @@
 #include "model/SimModel.h"
 #include "model/Examples.h"
 #include "controller/SimController.h"
+#include "model/Runner.h"
+#include <sstream>
 #include <iostream>
 #include <functional>
 #include <filesystem>
@@ -86,6 +88,68 @@ int main() {
       Machine m(p); m.run(100); CHECK(m.halted && m.haltKind == "input");
       m.feedInput("mundo\n"); m.run(100);
       uint32_t b = p.symbols.at("buf"); CHECK(m.readByte(b) == 'm'); CHECK(m.readByte(b + 4) == 'o'); CHECK(m.readByte(b + 5) == 0); }
+
+
+    // --- MUL/MLA/SMULL: Rd puede coincidir con Rm, Rs o Rn (antes daba error) ---
+    { Program p; auto m = runSrc("MOV R1,#6\nMOV R2,#7\nMUL R1,R1,R2\nMOV R3,#5\nMLA R3,R3,R2,R3\nMOV R4,#3\nMUL R4,R2,R4\nLDR R6,=0x80000000\nMOV R7,#2\nSMULL R6,R8,R6,R7\n", p);
+      CHECK(p.ok); CHECK(m.r[1] == 42); CHECK(m.r[3] == 40); CHECK(m.r[4] == 21); CHECK(m.r[6] == 0); CHECK(m.r[8] == 0xFFFFFFFF); }
+    { auto p = assemble("MUL R0,R0,R0\n"); CHECK(p.ok); }
+    { auto p = assemble("UMULL R1,R1,R2,R3\n"); CHECK(!p.ok); }      // RdLo == RdHi sigue siendo impredecible
+    { auto p = assemble("MUL PC,R1,R2\n"); CHECK(!p.ok); }           // PC no se admite como operando
+    { auto e = encodeLine("MUL R1, R1, R2", 0x1000, {}); CHECK(e.ok); }
+
+    // --- Directivas de GNU as: .align real en datos, .section, .hword, .comm, ejecucion desde main ---
+    { auto p = assemble(".section .data\ns: .asciz \"abc\"\n.align 2\nw: .word 7\n.balign 8\nz: .word 1\n.text\n.global main\nmain: bx lr\n"); CHECK(p.ok);
+      if (p.ok) { CHECK(p.symbols.at("w") % 4 == 0); CHECK(p.symbols.at("z") % 8 == 0); } }
+    { auto p = assemble(".data\nh: .hword 0x1234, 0x5678\n.text\nmain: ldr r0,=h\nldrh r1,[r0]\nldrh r2,[r0,#2]\n"); CHECK(p.ok); if (p.ok) { Machine m(p); m.run(100); CHECK(m.r[1] == 0x1234); CHECK(m.r[2] == 0x5678); } }
+    { auto p = assemble(".comm buf, 16, 4\n.text\nmain: ldr r0,=buf\n"); CHECK(p.ok); if (p.ok) CHECK(p.symbols.at("buf") % 4 == 0); }
+    { Program p; auto m = runSrc("helper: mov r5,#99\nbx lr\nmain: mov r4,#1\nbl helper\nswi 0x11\n", p); CHECK(m.r[4] == 1); CHECK(m.r[5] == 99); }   // empieza en main, no en la 1.ª instruccion
+
+    // --- printf: anchura, relleno y mas conversiones ---
+    { auto p = assemble("main: push {lr}\nldr r0,=f\nmov r1,#42\nmov r2,#255\nldr r3,=s\nbl printf\npop {lr}\nbx lr\n.data\nf: .asciz \"[%5d][%03d][%-4s]\\n\"\ns: .asciz \"ab\"\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "[   42][255][ab  ]\n"); } }
+    { // el 4.º argumento de printf va en la pila (AAPCS)
+      auto p = assemble("main: push {lr}\nmov r4,#4\npush {r4}\nldr r0,=f\nmov r1,#1\nmov r2,#2\nmov r3,#3\nbl printf\nadd sp,sp,#4\npop {lr}\nbx lr\n.data\nf: .asciz \"%d%d%d%d\"\n");
+      CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "1234"); } }
+    { auto p = assemble("main: push {lr}\nldr r0,=f\nmov r1,#42\nmov r2,#255\nbl printf\npop {lr}\nbx lr\n.data\nf: .asciz \"[%5d][%03d]\\n\"\n"); CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "[   42][255]\n"); } }
+    { auto p = assemble("main: push {lr}\nmov r0,#72\nbl putchar\nmov r0,#105\nbl putchar\npop {lr}\nbx lr\n"); CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.output == "Hi"); } }
+
+    // --- Modo sin interfaz (Runner): equivale a ejecutar el binario o a llamar desde C a una rutina ensamblador ---
+    { auto p = assemble("        .global main\nmain:   push {lr}\n        ldr r0,=f\n        mov r1,#6\n        bl printf\n        pop {lr}\n        mov r0,#0\n        bx lr\n        .data\nf:      .asciz \"Valor=%d\\n\"\n");
+      RunOptions ro; std::istringstream in; std::ostringstream out, diag; RunResult r = runProgram(p, ro, in, out, diag);
+      CHECK(r.ok); CHECK(out.str() == "Valor=6\n"); CHECK(r.haltKind == "exit"); }
+    { // llamada estilo C: suma(a, b) devuelve R0 = a + b
+      auto p = assemble("suma: add r0,r0,r1\nbx lr\n"); RunOptions ro; ro.callStyle = true; ro.entry = "suma";
+      CallArg a, b; std::string err; CHECK(parseCallArg("20", a, err)); CHECK(parseCallArg("22", b, err)); ro.args = {a, b};
+      std::istringstream in; std::ostringstream out, diag; RunResult r = runProgram(p, ro, in, out, diag); CHECK(r.ok); CHECK(r.r0 == 42); }
+    { // cadenas y arrays como argumentos (punteros): longitud de cadena y suma de un array
+      auto p = assemble("largo: mov r2,#0\nl1: ldrb r3,[r0,r2]\ncmp r3,#0\naddne r2,r2,#1\nbne l1\nmov r0,r2\nbx lr\n"
+                        "sumar: mov r2,#0\nmov r3,#0\nl2: cmp r3,r1\nbge f2\nldr r12,[r0,r3,lsl #2]\nadd r2,r2,r12\nadd r3,r3,#1\nb l2\nf2: mov r0,r2\nbx lr\n");
+      CHECK(p.ok);
+      { RunOptions ro; ro.callStyle = true; ro.entry = "largo"; CallArg a; std::string e; CHECK(parseCallArg("s:hola mundo", a, e)); ro.args = {a};
+        std::istringstream in; std::ostringstream out, diag; RunResult r = runProgram(p, ro, in, out, diag); CHECK(r.ok); CHECK(r.r0 == 10); }
+      { RunOptions ro; ro.callStyle = true; ro.entry = "sumar"; CallArg a, n; std::string e; CHECK(parseCallArg("w:1,2,3,4", a, e)); CHECK(parseCallArg("4", n, e)); ro.args = {a, n};
+        std::istringstream in; std::ostringstream out, diag; RunResult r = runProgram(p, ro, in, out, diag); CHECK(r.ok); CHECK(r.r0 == 10); } }
+    { // scanf con entrada simulada (--input)
+      auto p = assemble("main: push {lr}\nldr r0,=f\nldr r1,=v\nbl scanf\nldr r1,=v\nldr r1,[r1]\nldr r0,=g\nbl printf\npop {lr}\nbx lr\n.data\nf: .asciz \"%d\"\ng: .asciz \"leido %d\\n\"\nv: .word 0\n");
+      RunOptions ro; ro.useStdinText = true; ro.stdinText = "123\n"; std::istringstream in; std::ostringstream out, diag; RunResult r = runProgram(p, ro, in, out, diag);
+      CHECK(r.ok); CHECK(out.str() == "leido 123\n"); }
+    { CallArg a; std::string e; CHECK(!parseCallArg("hola", a, e)); CHECK(parseCallArg("-5", a, e) && (int32_t)a.value == -5); CHECK(parseCallArg("'A'", a, e) && a.value == 65); }
+
+    // --- Rutas de archivo y apertura ---
+    { CHECK(normalizeUserPath("  \"/tmp/a b.s\"  ") == "/tmp/a b.s"); CHECK(normalizeUserPath("file:///tmp/a%20b.s") == "/tmp/a b.s"); }
+    { SimModel model; SimController ctl(model);
+      std::string tmp = (std::filesystem::temp_directory_path() / "armsim_open_test.s").string();
+      CHECK(ctl.openFile("/no/existe/nada.s") == false);                       // error claro, sin colgarse
+      ctl.editorChanged("MOV R0,#7\n"); CHECK(ctl.saveFile("\"" + tmp + "\""));   // ruta con comillas pegadas
+      CHECK(ctl.openFile("  " + tmp + "  ")); CHECK(model.source().find("MOV R0,#7") != std::string::npos);
+      CHECK(!ctl.openFile(std::filesystem::temp_directory_path().string()));     // una carpeta no es un archivo
+      std::filesystem::remove(tmp); }
+
+    // --- Ahorro de energia ---
+    { UiPrefs u; setPowerOverride(-1); u.powerMode = 1; CHECK(resolveLowPower(1)); CHECK(!resolveLowPower(2)); setPowerOverride(0); CHECK(!resolveLowPower(1)); setPowerOverride(1); CHECK(resolveLowPower(2)); setPowerOverride(-1);
+      SimModel model; Settings s = model.settings(); s.ui.powerMode = 1; model.applySettings(s); CHECK(model.settings().ui.lowPower); CHECK(!model.settings().ui.anim());
+      s.ui.powerMode = 2; model.applySettings(s); CHECK(!model.settings().ui.lowPower); }
 
     // --- Ejemplos incluidos: todos ensamblan y terminan sin error ---
     for (auto& e : examples()) { auto p = assemble(e.code); CHECK(p.ok); if (!p.ok) { std::cerr << "  ejemplo: " << e.name << "\n"; continue; }
