@@ -69,7 +69,7 @@ endif()
 
 # ------------------------- Modo sin interfaz (CLI) ---------------------------
 # Sin SDL, OpenGL ni ImGui: se puede compilar en cualquier máquina (también sin Raspberry Pi).
-add_library(armsim_cli STATIC src/cli/Cli.cpp)
+add_library(armsim_cli STATIC src/cli/Cli.cpp src/cli/CCompiler.cpp)
 target_link_libraries(armsim_cli PUBLIC armsim_model)
 add_executable(armsim-cli src/cli/main_cli.cpp)
 target_link_libraries(armsim-cli PRIVATE armsim_cli)

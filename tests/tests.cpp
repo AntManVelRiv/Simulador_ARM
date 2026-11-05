@@ -70,6 +70,12 @@ int main() {
       auto p = assemble(".macro incr r\ncmp \\r,#0\nbeq skip\\@\nadd \\r,\\r,#1\nskip\\@:\n.endm\nmov r0,#5\nmov r1,#0\nincr r0\nincr r1\n");
       CHECK(p.ok); if (p.ok) { Machine m(p); m.run(1000); CHECK(m.r[0] == 6); CHECK(m.r[1] == 0); } }
 
+    { // ".macro NOMBRE, param" (coma tras el nombre) + invocacion detras de una etiqueta (Pr2_Ejemplo2_Codigo_Menor.s)
+      Program p; auto m = runSrc(".macro myPUSH, a\nsub sp,sp,#4\nstr \\a,[sp]\n.endm\n.macro myPOP, a\nldr \\a,[sp]\nadd sp,sp,#4\n.endm\n"
+                                 "Menor: myPUSH r4\nmyPUSH lr\ncmp r0,r1\nblt R2\nmov r0,r1\nR2: myPOP lr\nmyPOP r4\nbx lr\n"
+                                 "main: mov r0,#4\nmov r1,#9\nbl Menor\nmov r5,r0\nmov r0,#8\nmov r1,#3\nbl Menor\nmov r6,r0\nswi 0x11\n", p);
+      CHECK(p.ok); CHECK(m.r[5] == 4); CHECK(m.r[6] == 3); CHECK(m.r[13] == STACK_TOP); }
+
     // --- Funciones de biblioteca simuladas por "BL": printf, scanf, puts, gets, strlen ---
     { // el ejemplo exacto de "capital" con printf("%s") de la Relacion 2 (UAL)
       auto p = assemble("main: push {r2,lr}\nldr r0, =msg1\nldr r1,=array\nbl printf\nldr r0, =array\nmov r1, #15\nbl Capital\nldr r0, =msg2\nldr r1, =array\nbl printf\npop {r2,lr}\nbx lr\n"
@@ -195,6 +201,17 @@ int main() {
       ctl.step(); CHECK(model.machine()->output == "17");            // SWI 0x21
       ctl.step(); CHECK(model.machine()->haltKind == "exit");        // SWI 0x11
     }
+    // ---- Soporte para codigo generado por gcc (docs/C_CON_GCC.md) ----
+    { Program p; auto m = runSrc("ldr r3, .L9\nldr r4, .L9+4\nb .L10\n.L9:\n.word 111\n.word 222\n.L10:\nmov r5, #1\n", p);
+      CHECK(p.ok); CHECK(m.r[3] == 111); CHECK(m.r[4] == 222); CHECK(m.r[5] == 1); }          // pool de literales dentro de .text
+    { Program p; auto m = runSrc("mov r0,#1\nmov r1,#2\nmov r2,#3\nldr r6,=buf\nstm r6!, {r0,r1,r2}\nldr r7,=buf\nldm r7, {r3,r4,r5}\nb fin\n.data\nbuf: .space 16\n.text\nfin: nop\n", p);
+      CHECK(p.ok); CHECK(m.r[3] == 1 && m.r[4] == 2 && m.r[5] == 3); CHECK(m.r[6] == m.r[7] + 12); }   // LDM/STM con base cualquiera
+    { Program p = assemble(".data\ns: .ascii \"a\\012b\\000\"\n.text\nnop\n"); CHECK(p.ok); CHECK(p.initialMem.at(p.symbols.at("s") + 1) == 10); }   // escapes octales
+    { Program p; auto m = runSrc("mvn r0,#16\nmov r1,#5\nbl __aeabi_idivmod\nmov r4,r0\nmov r5,r1\n", p); CHECK(p.ok); CHECK((int32_t)m.r[4] == -3 && (int32_t)m.r[5] == -2); }
+    { // scanf como en C: solo consume lo que casa; el resto queda para la siguiente lectura
+      Program p = assemble(".data\nf: .asciz \"%d\"\na: .word 0\nb: .word 0\n.text\nmain: ldr r0,=f\nldr r1,=a\nbl scanf\nldr r0,=f\nldr r1,=b\nbl scanf\nmov r7,r0\nbx lr\n");
+      Machine m(p); m.pc = p.symbols.at("main"); m.r[14] = 0; m.feedInput("3 4"); m.run(1000);
+      CHECK(m.readWord(p.symbols.at("a")) == 3); CHECK(m.readWord(p.symbols.at("b")) == 4); CHECK(m.r[7] == 1); }
     std::cout << (total - failures) << "/" << total << " comprobaciones correctas\n";
     return failures ? 1 : 0;
 }

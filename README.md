@@ -27,7 +27,8 @@ Aplicación de escritorio nativa en C++ para ensamblar y ejecutar programas ARMv
   una Raspberry Pi (detección automática) o con `--low-power` / `Personalizar → Ahorro de energía → Siempre activado`, la
   ventana **duerme** hasta que hay entrada del usuario y, si el programa se ejecuta, se limita a ~20 FPS; además se
   desactivan el fondo animado, los destellos y los fundidos. `--full-power` lo fuerza desactivado.
-- **Uso sin interfaz** (`armsim-cli`, o `armsim --run ...`).
+- **Programas en C sin Raspberry**: `armsim-cli main.c rutina.s` compila los `.c` con un gcc cruzado ARM (`gcc -S`) y los ejecuta junto con el ensamblador; ver [docs/C_CON_GCC.md](docs/C_CON_GCC.md).
+- **Uso sin interfaz** (`armsim-cli`, o `armsim --run ...`) :
 
 ```bash
 cmake -B build -DARMSIM_BUILD_GUI=OFF && cmake --build build --target armsim-cli   # no necesita SDL ni OpenGL

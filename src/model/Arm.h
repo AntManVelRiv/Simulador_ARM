@@ -103,6 +103,8 @@ struct Instruction {
     uint32_t regList = 0;          // máscara de 16 bits
     std::string blkMode;           // IA/IB/DA/DB (tras traducir FD/FA/ED/EA)
     bool isStack = false;
+    int blkBase = 13;              // registro base (SP en PUSH/POP)
+    bool blkWb = true;             // actualizar el registro base (bit W; '!' en LDM/STM)
     // swi
     uint32_t swiNum = 0;
     // formato / info para UI
@@ -205,8 +207,12 @@ public:
     // debe llamar a feedInput() con lo que el usuario escriba (se le añade un salto de línea)
     // y la máquina reintentará automáticamente la misma instrucción.
     void feedInput(const std::string& text);
+    // Fin de la entrada (EOF): scanf/getchar/fgets/gets dejan de bloquear y devuelven EOF/NULL, como en C
+    void signalEof() { eof_ = true; if (halted && haltKind == "input") { halted = false; haltReason.clear(); haltKind.clear(); } }
+    bool eofSignaled() const { return eof_; }
     bool hasPendingChar() const { return inputPos_ < input_.size(); }
     bool hasPendingLine() const { return input_.find('\n', inputPos_) != std::string::npos; }
+    std::string readCStringPublic(uint32_t addr, size_t maxLen = 8192) const { return readCString(addr, maxLen); }
     std::string peekPendingInput() const { return input_.substr(inputPos_); }
 
     // Bandera informativa (no de error): true tras ejecutar una llamada a una
@@ -223,10 +229,14 @@ public:
 
 private:
     std::string input_; size_t inputPos_ = 0;
+    bool eof_ = false;
+    bool scanfNeedsMore(const std::string& fmt) const;
+    uint32_t heapNext_ = 0x08000000; uint32_t randState_ = 1;   // malloc (asignador lineal) y rand()
     char takeChar();
     std::string takeLine();
     std::string readCString(uint32_t addr, size_t maxLen = 8192) const;
     void runLibraryCall(const std::string& fn, StepRecord& rec);
+    bool runExtraLibraryCall(const std::string& fn, StepRecord& rec);
     struct Snapshot {
         std::array<uint32_t,16> r; uint32_t pc; Flags f;
         std::vector<MemWrite> memUndo; // aplicar en orden inverso para deshacer

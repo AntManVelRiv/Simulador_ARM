@@ -89,7 +89,17 @@ int parseReg(const std::string& sIn) {
 // ============================================================================
 // Funciones de biblioteca simuladas (printf, scanf, puts, gets, strlen)
 // ============================================================================
-const std::vector<std::string> LIB_FUNC_NAMES = {"printf", "scanf", "puts", "gets", "strlen", "putchar", "getchar", "atoi", "exit"};
+const std::vector<std::string> LIB_FUNC_NAMES = {"printf", "scanf", "puts", "gets", "strlen", "putchar", "getchar", "atoi", "exit",
+    // anadidas para poder ejecutar programas compilados con gcc (ver docs/C_CON_GCC.md)
+    "sprintf", "strcpy", "strncpy", "strcmp", "strncmp", "strcat", "strchr", "memcpy", "memmove", "memset", "memcmp",
+    "abs", "toupper", "tolower", "isdigit", "isalpha", "isalnum", "isspace", "isupper", "islower",
+    "malloc", "calloc", "free", "rand", "srand",
+    "__aeabi_idiv", "__aeabi_uidiv", "__aeabi_idivmod", "__aeabi_uidivmod",
+    "fgets", "fputs", "fflush", "fprintf", "snprintf", "time", "__aeabi_ldivmod", "__aeabi_uldivmod"};
+// Nombres alternativos que genera el compilador para la misma funcion
+static const std::vector<std::pair<std::string,std::string>> LIB_ALIASES = {
+    {"__isoc99_scanf","scanf"}, {"__isoc23_scanf","scanf"}, {"__printf_chk","printf"}, {"__aeabi_memcpy","memcpy"}, {"__aeabi_memcpy4","memcpy"}, {"__aeabi_memcpy8","memcpy"},
+    {"__aeabi_memmove","memmove"}, {"__aeabi_memset","memset"}, {"__sprintf_chk","sprintf"}, {"__aeabi_idiv","__aeabi_idiv"}};
 const char* libraryFunctionName(uint32_t addr) {
     if (addr < LIB_BASE) return nullptr;
     uint32_t idx = (addr - LIB_BASE) / 4;
@@ -466,6 +476,24 @@ static MemOperand parseMemOperand(const std::vector<std::string>& toks, size_t s
     return m;
 }
 
+
+// LDM/STM: "Rn[!], {lista}"  ->  base, writeback y lista (PUSH/POP: SP! implicito)
+static void parseBlockOperands(Instruction& ins, const std::vector<std::string>& toks, bool stackForm) {
+    ins.blkBase = 13; ins.blkWb = true;
+    size_t first = 0;
+    if (!stackForm) {
+        if (toks.size() < 2) throw AsmException(ins.mnemonic + " espera: Rn[!], {lista de registros}");
+        std::string b = trim(toks[0]); bool wb = false;
+        if (!b.empty() && b.back()=='!') { wb = true; b = trim(b.substr(0, b.size()-1)); }
+        int rn = parseReg(b);
+        if (rn < 0 || rn == 15) throw AsmException("Se esperaba un registro base (no PC) y aparece " + toks[0]);
+        ins.blkBase = rn; ins.blkWb = wb; first = 1;
+    }
+    std::string joined; for (size_t i=first;i<toks.size();i++){ if(i>first) joined+=", "; joined+=toks[i]; }
+    ins.regList = joined.empty()? 0 : parseRegList(joined);
+    if (ins.regList==0) throw AsmException("La lista de registros no puede estar vacia");
+}
+
 // ============================================================================
 // Construccion de campos (para mostrar en la UI)
 // ============================================================================
@@ -615,14 +643,14 @@ static void translateBlockMode(const std::string& mode, bool load, bool& P, bool
 static void encodeBlock(Instruction& ins) {
     bool P,U; translateBlockMode(ins.blkMode, ins.load, P, U);
     uint32_t L = ins.load?1:0;
-    ins.word = ((uint32_t)ins.cond<<28) | (1u<<27) | ((P?1u:0u)<<24) | ((U?1u:0u)<<23) | (0u<<22) | (1u<<21) | (L<<20) | (13u<<16) | ins.regList;
+    ins.word = ((uint32_t)ins.cond<<28) | (1u<<27) | ((P?1u:0u)<<24) | ((U?1u:0u)<<23) | (0u<<22) | ((ins.blkWb?1u:0u)<<21) | (L<<20) | ((uint32_t)ins.blkBase<<16) | ins.regList;
     ins.format = "Acceso a memoria";
     auto& F = ins.fields;
     F.push_back(mkField(31,28,"cond","cond", ins.word, condNoteStr(ins.cond)));
     F.push_back(mkField(24,24,"P","flag", ins.word, P?"antes":"despues"));
     F.push_back(mkField(23,23,"U","flag", ins.word, U?"incrementa":"decrementa"));
     F.push_back(mkField(20,20,"L","flag", ins.word, L?"LDM":"STM"));
-    F.push_back(mkField(19,16,"Rn","rn", ins.word, "base: "+regLabel(13)));
+    F.push_back(mkField(19,16,"Rn","rn", ins.word, "base: "+regLabel(ins.blkBase)));
     F.push_back(mkField(15,0,"lista de registros","src", ins.word, "un bit por registro (bit n = Rn)"));
 }
 static void encodeSwi(Instruction& ins) {
@@ -658,7 +686,17 @@ static std::string parseStringLit(const std::string& sIn) {
     for (size_t i=0;i<inner.size();i++) {
         if (inner[i]=='\\' && i+1<inner.size()) {
             char c = inner[++i];
-            switch(c){case 'n':out+='\n';break;case 't':out+='\t';break;case 'r':out+='\r';break;case '0':out+='\0';break;default:out+=c;}
+            if (c >= '0' && c <= '7') {          // escape octal (gcc escribe "\012", "\000"...): hasta 3 cifras
+                int v = c - '0'; int k = 1;
+                while (k < 3 && i+1 < inner.size() && inner[i+1] >= '0' && inner[i+1] <= '7') { v = v*8 + (inner[++i] - '0'); k++; }
+                out += (char)v; continue;
+            }
+            if (c == 'x' && i+1 < inner.size() && std::isxdigit((unsigned char)inner[i+1])) {   // \xHH
+                int v = 0, k = 0;
+                while (k < 2 && i+1 < inner.size() && std::isxdigit((unsigned char)inner[i+1])) { char h = inner[++i]; v = v*16 + (std::isdigit((unsigned char)h) ? h-'0' : (std::tolower(h)-'a'+10)); k++; }
+                out += (char)v; continue;
+            }
+            switch(c){case 'n':out+='\n';break;case 't':out+='\t';break;case 'r':out+='\r';break;case 'a':out+='\a';break;case 'b':out+='\b';break;case 'f':out+='\f';break;case 'v':out+='\v';break;default:out+=c;}
         } else out += inner[i];
     }
     return out;
@@ -761,7 +799,9 @@ static std::vector<RawLine> expandMacros(const std::vector<RawLine>& in, std::ve
             bool isMacroStart = (up == ".MACRO") || (up.size() > 6 && up.compare(0, 6, ".MACRO") == 0 && std::isspace((unsigned char)up[6]));
             if (isMacroStart) {
                 std::string rest = trim(t.substr(6));
-                std::istringstream iss(rest); std::string name; iss >> name;
+                // El nombre termina en un espacio o en una coma: ".macro myPOP, a" y ".macro myPOP a" son validos en GNU as
+                size_t ne = rest.find_first_of(" \t,"); std::string name = rest.substr(0, ne);
+                std::istringstream iss(ne == std::string::npos ? std::string() : rest.substr(ne));
                 if (name.empty()) { errs.push_back({rl.lineNo, ".macro necesita un nombre: .macro NOMBRE [param1, param2...]", ""}); continue; }
                 std::string restParams; std::getline(iss, restParams); restParams = trim(restParams);
                 if (!restParams.empty() && restParams[0]==',') restParams = trim(restParams.substr(1));
@@ -817,6 +857,12 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
 
     auto err = [&](int line, const AsmException& e) { prog.errors.push_back({line, e.what(), e.hint}); };
 
+    // Posicion actual y avance segun la seccion: los datos escritos dentro de .text (p. ej. el "pool de
+    // literales" que genera gcc: ".L9: .word .LC0") se colocan en linea con el codigo, de modo que la
+    // etiqueta y el dato coinciden. Antes iban siempre al area de datos aunque la etiqueta estuviera en .text.
+    auto cur = [&]() -> uint32_t { return sec=="text" ? opt.textBase + tOff : opt.dataBase + dOff; };
+    auto adv = [&](uint32_t n) { if (sec=="text") tOff += n; else dOff += n; };
+
     auto defineLabel = [&](const std::string& name, int) {
         uint32_t addr = (sec=="text") ? (opt.textBase + tOff) : (opt.dataBase + dOff);
         if (symTmp.count(name)) throw AsmException("La etiqueta " + name + " ya esta definida");
@@ -864,24 +910,27 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                 else if (dir==".GLOBAL" || dir==".GLOBL" || dir==".EXTERN" || dir==".SYNTAX" || dir==".CODE" || dir==".ARM" || dir==".THUMB"
                          || dir==".TYPE" || dir==".SIZE" || dir==".FUNC" || dir==".ENDFUNC" || dir==".FNSTART" || dir==".FNEND" || dir==".ARCH" || dir==".CPU"
                          || dir==".FPU" || dir==".FILE" || dir==".IDENT" || dir==".EABI_ATTRIBUTE" || dir==".LTORG" || dir==".POOL" || dir==".WEAK"
-                         || dir==".HIDDEN" || dir==".LOCAL" || dir==".THUMB_FUNC" || dir==".CFI_STARTPROC" || dir==".CFI_ENDPROC") { }
+                         || dir==".HIDDEN" || dir==".LOCAL" || dir==".PROTECTED" || dir==".GNU_ATTRIBUTE" || dir==".PREVIOUS" || dir.rfind(".CFI_",0)==0 || dir==".THUMB_FUNC" || dir==".CFI_STARTPROC" || dir==".CFI_ENDPROC") { }
                 else if (dir==".ALIGN" || dir==".BALIGN" || dir==".P2ALIGN") {
                     // En ARM de GNU as, .align N alinea a 2^N bytes; .balign N, a N bytes. Solo importa en datos
                     // (las instrucciones ya van alineadas a 4).
-                    if (sec=="data") {
+                    {
                         auto parts = splitTop(rest);
-                        long long n = parts.empty() ? (dir==".BALIGN" ? 4 : 2) : (long long)evalExpr(parts[0], symTmp, opt.dataBase+dOff);
+                        long long n = parts.empty() ? (dir==".BALIGN" ? 4 : 2) : (long long)evalExpr(parts[0], symTmp, cur());
                         long long a = (dir==".BALIGN") ? n : (n >= 0 && n < 16 ? (1LL << n) : 0);
                         if (a > 1 && a <= 4096) {
-                            uint32_t pad = (uint32_t)((a - (dOff % a)) % a);
-                            if (pad) { RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="space"; it.spaceLen=(int)pad; it.addr=opt.dataBase+dOff; items.push_back(it); dOff += pad; }
+                            uint32_t off = (sec=="text") ? tOff : dOff;
+                            uint32_t pad = (uint32_t)((a - (off % a)) % a);
+                            if (pad && !(sec=="text" && a <= 4)) {   // en .text las instrucciones ya van alineadas a 4
+                                RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="space"; it.spaceLen=(int)pad; it.addr=cur(); items.push_back(it); adv(pad);
+                            }
                         }
                     }
                 }
                 else if (dir==".HWORD" || dir==".SHORT" || dir==".2BYTE") {
                     auto parts = splitTop(rest); if (parts.empty()) throw AsmException(dir+" espera al menos un valor");
-                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="half"; it.values=parts; it.addr = opt.dataBase+dOff;
-                    items.push_back(it); dOff += 2*(uint32_t)parts.size();
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="half"; it.values=parts; it.addr = cur();
+                    items.push_back(it); adv(2*(uint32_t)parts.size());
                 }
                 else if (dir==".COMM" || dir==".LCOMM") {
                     // .comm nombre, tamaño[, alineacion]: reserva memoria inicializada a 0 en la zona de datos
@@ -900,26 +949,26 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                     uint32_t v = evalExpr(parts[1], symTmp, sec=="text"?opt.textBase+tOff:opt.dataBase+dOff);
                     symTmp[parts[0]] = v;
                 }
-                else if (dir==".WORD" || dir==".LONG" || dir==".INT") {
+                else if (dir==".WORD" || dir==".LONG" || dir==".INT" || dir==".4BYTE") {
                     auto parts = splitTop(rest); if (parts.empty()) throw AsmException(".word espera al menos un valor");
-                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="word"; it.values=parts; it.addr = opt.dataBase+dOff;
-                    items.push_back(it); dOff += 4*(uint32_t)parts.size();
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="word"; it.values=parts; it.addr = cur();
+                    items.push_back(it); adv(4*(uint32_t)parts.size());
                 }
                 else if (dir==".BYTE") {
                     auto parts = splitTop(rest); if (parts.empty()) throw AsmException(".byte espera al menos un valor");
-                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="byte"; it.values=parts; it.addr = opt.dataBase+dOff;
-                    items.push_back(it); dOff += (uint32_t)parts.size();
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="byte"; it.values=parts; it.addr = cur();
+                    items.push_back(it); adv((uint32_t)parts.size());
                 }
-                else if (dir==".SPACE" || dir==".SKIP") {
-                    int n = (int)evalExpr(rest, symTmp, opt.dataBase+dOff);
-                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="space"; it.spaceLen=n; it.addr=opt.dataBase+dOff;
-                    items.push_back(it); dOff += (uint32_t)n;
+                else if (dir==".SPACE" || dir==".SKIP" || dir==".ZERO") {
+                    int n = (int)evalExpr(rest, symTmp, cur());
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="space"; it.spaceLen=n; it.addr=cur();
+                    items.push_back(it); adv((uint32_t)n);
                 }
                 else if (dir==".ASCII" || dir==".ASCIZ" || dir==".STRING") {
                     std::string str = parseStringLit(rest);
                     if (dir!=".ASCII") str += '\0';
-                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="ascii"; it.values={str}; it.addr=opt.dataBase+dOff;
-                    items.push_back(it); dOff += (uint32_t)str.size();
+                    RawItem it; it.line=rl.lineNo; it.section=sec; it.kind="ascii"; it.values={str}; it.addr=cur();
+                    items.push_back(it); adv((uint32_t)str.size());
                 }
                 else if (dir==".END") { ended = true; }
                 else if (dir==".ORG") {
@@ -929,6 +978,9 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                 }
                 else throw AsmException("Directiva no reconocida: " + dir);
                 continue;
+            }
+            if (tOff % 4) {   // tras .byte/.ascii dentro de .text, las instrucciones vuelven a quedar alineadas
+                RawItem pad; pad.line=rl.lineNo; pad.section="text"; pad.kind="space"; pad.spaceLen=(int)(4 - tOff%4); pad.addr=opt.textBase+tOff; items.push_back(pad); tOff += 4 - tOff%4;
             }
             RawItem it; it.line=rl.lineNo; it.section="text"; it.kind="instr"; it.text=text; it.addr = opt.textBase+tOff;
             items.push_back(it); tOff += 4;
@@ -948,6 +1000,7 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
         const std::string& name = LIB_FUNC_NAMES[i];
         if (!symTmp.count(name)) symTmp[name] = LIB_BASE + (uint32_t)(4 * i);
     }
+    for (auto& al : LIB_ALIASES) if (!symTmp.count(al.first) && symTmp.count(al.second)) symTmp[al.first] = symTmp[al.second];
 
     std::vector<std::pair<std::string,uint32_t>> poolEntries;
     auto poolAddrFor = [&](const std::string& expr)->uint32_t {
@@ -1048,14 +1101,24 @@ Program assemble(const std::string& source, const AsmOptions& opt) {
                     if (toks.size()<2) throw AsmException(pm.base+" espera Rd, [operando de memoria]");
                     ins.mnemonic=pm.base; ins.load=pm.load; ins.size=pm.size; ins.signedLoad=pm.signedLoad; ins.t = IType::MEM;
                     ins.rd=parseReg(toks[0]); if(ins.rd<0) throw AsmException("Se esperaba un registro");
+                    if (toks[1].empty() || toks[1][0] != '[') {
+                        // "LDR Rd, etiqueta" / "LDR Rd, etiqueta+4": direccionamiento relativo a PC (lo genera gcc para su pool de literales)
+                        if (!pm.load && pm.base != "STR") throw AsmException("Se esperaba [ para el operando de memoria");
+                        uint32_t target = evalExpr(toks[1], symTmp, addr);
+                        int32_t rel = (int32_t)target - (int32_t)(addr + 8);
+                        if (std::abs(rel) > 0xFFF) throw AsmException("La etiqueta " + toks[1] + " esta demasiado lejos para LDR/STR relativo a PC (maximo 4095 bytes)");
+                        ins.mem.baseReg = 15; ins.mem.preIndexed = true; ins.mem.writeBack = false; ins.mem.offsetIsReg = false;
+                        ins.mem.add = rel >= 0; ins.mem.offsetImm = std::abs(rel);
+                        encodeMem(ins);
+                        ins.note = "Direccionamiento relativo a PC: accede a " + toks[1] + " (" + hx0x(target) + ").";
+                    } else {
                     ins.mem = parseMemOperand(toks,1);
                     encodeMem(ins);
+                    }
                 } else if (pm.kind=="blk") {
                     ins.mnemonic=pm.base; ins.load=pm.load; ins.blkMode=pm.mode; ins.isStack=pm.stack; ins.t = IType::BLK;
                     if (toks.empty()) throw AsmException(pm.base+" espera una lista de registros entre llaves");
-                    std::string joined; for (size_t i=0;i<toks.size();i++){ if(i) joined+=", "; joined+=toks[i]; }
-                    ins.regList = parseRegList(joined);
-                    if (ins.regList==0) throw AsmException("La lista de registros no puede estar vacia");
+                    parseBlockOperands(ins, toks, pm.stack);
                     encodeBlock(ins);
                 } else if (pm.kind=="br") {
                     ins.mnemonic=pm.base; ins.link=pm.link; ins.t = IType::BR;
@@ -1147,9 +1210,7 @@ EncodeResult encodeLine(const std::string& textIn, uint32_t addr, const std::map
             encodeMull(ins);
         } else if (pm.kind=="blk") {
             ins.mnemonic=pm.base; ins.load=pm.load; ins.blkMode=pm.mode;
-            std::string joined; for (size_t i=0;i<toks.size();i++){ if(i) joined+=", "; joined+=toks[i]; }
-            ins.regList = joined.empty()? 0 : parseRegList(joined);
-            if (ins.regList==0) throw AsmException("La lista de registros no puede estar vacia");
+            parseBlockOperands(ins, toks, pm.stack);
             encodeBlock(ins);
         } else if (pm.kind=="swi") { ins.mnemonic=pm.base; ins.swiNum = toks.empty()?0:evalExpr(toks[0][0]=='#'?toks[0].substr(1):toks[0], syms, addr); encodeSwi(ins); }
         else if (pm.kind=="shift") {
@@ -1230,6 +1291,51 @@ static uint32_t applyShift(int type, uint32_t v, int n, bool& carryOut, bool car
     }
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// scanf "de verdad": consume de la entrada solo lo que casa con el formato (el resto queda para la
+// siguiente lectura, igual que en C). Admite %d %i %u %x %X %o %s %c %%, anchura implicita y %*d.
+// ---------------------------------------------------------------------------------------------
+struct ScanItem { char type = 'd'; long long num = 0; std::string str; int size = 4; };
+static int scanfParse(const std::string& buf, size_t pos, const std::string& fmt, std::vector<ScanItem>& items, size_t& newPos, bool& needMore) {
+    needMore = false; int n = 0; size_t p = pos;
+    auto skipWs = [&](size_t q) { while (q < buf.size() && std::isspace((unsigned char)buf[q])) q++; return q; };
+    for (size_t i = 0; i < fmt.size(); i++) {
+        char fc = fmt[i];
+        if (std::isspace((unsigned char)fc)) { p = skipWs(p); continue; }
+        if (fc != '%') { if (p >= buf.size()) { needMore = true; break; } if (buf[p] != fc) break; p++; continue; }
+        if (++i >= fmt.size()) break;
+        bool suppress = false; if (fmt[i] == '*') { suppress = true; if (++i >= fmt.size()) break; }
+        while (i < fmt.size() && std::isdigit((unsigned char)fmt[i])) i++;
+        int size = 4; while (i < fmt.size() && std::strchr("hlLzjt", fmt[i])) { if (fmt[i] == 'h') size = (size == 2 ? 1 : 2); i++; }
+        if (i >= fmt.size()) break;
+        char c = fmt[i];
+        if (c != 'c') p = skipWs(p);
+        if (p >= buf.size()) { needMore = true; break; }
+        if (c == '%') { if (buf[p] != '%') break; p++; continue; }
+        ScanItem it; it.type = c; it.size = size;
+        if (std::strchr("diuxXo", c)) {
+            size_t q = p; bool neg = false; if (buf[q] == '+' || buf[q] == '-') { neg = buf[q] == '-'; q++; }
+            int base = (c == 'x' || c == 'X') ? 16 : c == 'o' ? 8 : c == 'i' ? 0 : 10;
+            const char* st = buf.c_str() + q; char* end = nullptr;
+            if (q >= buf.size() || std::isspace((unsigned char)*st)) { if (q >= buf.size()) needMore = true; break; }
+            unsigned long long v = std::strtoull(st, &end, base); if (end == st) break;
+            it.num = neg ? -(long long)v : (long long)v; p = q + (size_t)(end - st);
+        } else if (c == 's') {
+            size_t q = p; while (q < buf.size() && !std::isspace((unsigned char)buf[q])) q++;
+            it.str = buf.substr(p, q - p); p = q;
+        } else if (c == 'c') { it.str = std::string(1, buf[p]); p++; }
+        else break;                       // %f, %e... no soportados (el simulador no tiene coma flotante)
+        if (!suppress) { items.push_back(it); n++; }
+    }
+    newPos = p; return n;
+}
+bool Machine::scanfNeedsMore(const std::string& fmt) const {
+    std::vector<ScanItem> items; size_t np; bool more = false;
+    scanfParse(input_, inputPos_, fmt, items, np, more);
+    return more;
+}
+
 void Machine::feedInput(const std::string& text) {
     input_ += text;
     if (halted && haltKind == "input") { halted = false; haltReason.clear(); haltKind.clear(); }
@@ -1248,10 +1354,158 @@ std::string Machine::readCString(uint32_t addr, size_t maxLen) const {
     return s;
 }
 
+// Interpreta un formato estilo printf (%d %i %u %x %X %o %c %s %p %% con banderas, anchura y precision)
+static std::string cFormat(const Machine& m, const std::string& fmt, const std::function<uint32_t()>& nextArg) {
+    std::string outp;
+    for (size_t i = 0; i < fmt.size(); i++) {
+        if (fmt[i] != '%' || i + 1 >= fmt.size()) { outp += fmt[i]; continue; }
+        size_t j = i + 1; std::string flags, width, prec; bool hasPrec = false;
+        while (j < fmt.size() && std::strchr("-+ 0#", fmt[j])) flags += fmt[j++];
+        while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) width += fmt[j++];
+        if (j < fmt.size() && fmt[j] == '.') { hasPrec = true; j++; while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) prec += fmt[j++]; }
+        while (j < fmt.size() && std::strchr("hlzjt", fmt[j])) j++;      // modificadores de longitud: todo es de 32 bits
+        if (j >= fmt.size()) { outp += fmt.substr(i); break; }
+        char c = fmt[j]; std::string spec = "%" + flags + width + (hasPrec ? "." + (prec.empty() ? std::string("0") : prec) : std::string());
+        char buf[512]; buf[0] = 0;
+        switch (c) {
+            case 'd': case 'i': std::snprintf(buf, sizeof buf, (spec + "d").c_str(), (int)(int32_t)nextArg()); outp += buf; break;
+            case 'u': std::snprintf(buf, sizeof buf, (spec + "u").c_str(), (unsigned)nextArg()); outp += buf; break;
+            case 'x': std::snprintf(buf, sizeof buf, (spec + "x").c_str(), (unsigned)nextArg()); outp += buf; break;
+            case 'X': std::snprintf(buf, sizeof buf, (spec + "X").c_str(), (unsigned)nextArg()); outp += buf; break;
+            case 'o': std::snprintf(buf, sizeof buf, (spec + "o").c_str(), (unsigned)nextArg()); outp += buf; break;
+            case 'p': std::snprintf(buf, sizeof buf, "0x%x", (unsigned)nextArg()); outp += buf; break;
+            case 'c': std::snprintf(buf, sizeof buf, (spec + "c").c_str(), (int)(nextArg() & 0xFF)); outp += buf; break;
+            case 's': { std::string sv = m.readCStringPublic(nextArg()); std::snprintf(buf, sizeof buf, (spec + "s").c_str(), sv.substr(0, 400).c_str()); outp += buf; break; }
+            case '%': outp += '%'; break;
+            default: outp += fmt.substr(i, j - i + 1); break;
+        }
+        i = j;
+    }
+    return outp;
+}
+
+
+// Funciones de biblioteca adicionales (las que suele necesitar un programa en C compilado con gcc).
+// Convenio AAPCS: argumentos en R0..R3 (y pila), resultado en R0.
+bool Machine::runExtraLibraryCall(const std::string& fn, StepRecord& rec) {
+    auto ret = [&](uint32_t v) { uint32_t old = r[0]; r[0] = v; if (old != v) rec.regs.push_back({0, old, v}); };
+    auto setR = [&](int n, uint32_t v) { uint32_t old = r[n]; r[n] = v; if (old != v) rec.regs.push_back({n, old, v}); };
+    auto say = [&](const std::string& sym, const std::string& txt) { rec.sym = sym; rec.text = txt; };
+    uint32_t a0 = r[0], a1 = r[1], a2 = r[2];
+
+    if (fn == "__aeabi_idiv" || fn == "__aeabi_idivmod") {
+        int32_t n = (int32_t)a0, d = (int32_t)a1;
+        if (d == 0) { halt("Division entre cero (" + std::to_string(n) + " / 0).", "error"); return true; }
+        int64_t q = (int64_t)n / d, rem = (int64_t)n % d;
+        ret((uint32_t)(int32_t)q); if (fn == "__aeabi_idivmod") setR(1, (uint32_t)(int32_t)rem);
+        say(std::to_string(n) + " / " + std::to_string(d), "Division entera con signo (rutina de gcc: ARMv4 no tiene instruccion de division). Cociente en R0" + std::string(fn == "__aeabi_idivmod" ? ", resto en R1." : "."));
+        return true;
+    }
+    if (fn == "__aeabi_uidiv" || fn == "__aeabi_uidivmod") {
+        if (a1 == 0) { halt("Division entre cero (" + std::to_string(a0) + " / 0).", "error"); return true; }
+        ret(a0 / a1); if (fn == "__aeabi_uidivmod") setR(1, a0 % a1);
+        say(std::to_string(a0) + " / " + std::to_string(a1), "Division entera sin signo (rutina de gcc). Cociente en R0" + std::string(fn == "__aeabi_uidivmod" ? ", resto en R1." : "."));
+        return true;
+    }
+    if (fn == "__aeabi_ldivmod" || fn == "__aeabi_uldivmod") {
+        uint64_t nn = ((uint64_t)r[1] << 32) | r[0], dd = ((uint64_t)r[3] << 32) | r[2]; uint64_t q, rem;
+        if (dd == 0) { halt("Division entre cero (64 bits).", "error"); return true; }
+        if (fn == "__aeabi_ldivmod") { int64_t n = (int64_t)nn, d = (int64_t)dd; q = (uint64_t)(n / d); rem = (uint64_t)(n % d); }
+        else { q = nn / dd; rem = nn % dd; }
+        setR(0, (uint32_t)q); setR(1, (uint32_t)(q >> 32)); setR(2, (uint32_t)rem); setR(3, (uint32_t)(rem >> 32));
+        say("division de 64 bits", "Division entera de 64 bits (rutina de gcc): cociente en R1:R0, resto en R3:R2."); return true;
+    }
+    if (fn == "sprintf") {
+        std::string fmt = readCString(a1); int argi = 2;
+        auto nextArg = [&]() -> uint32_t { uint32_t v = (argi <= 3) ? r[argi] : readWord(r[13] + 4u * (uint32_t)(argi - 4)); argi++; return v; };
+        std::string outp = cFormat(*this, fmt, nextArg);
+        for (size_t k = 0; k < outp.size(); k++) writeByte(a0 + (uint32_t)k, (uint8_t)outp[k], &rec);
+        writeByte(a0 + (uint32_t)outp.size(), 0, &rec);
+        ret((uint32_t)outp.size()); say("sprintf(buf, \"" + fmt + "\", ...)", "Como printf, pero escribe el texto (con un 0 final) en el buffer de R0 en vez de en la consola.");
+        return true;
+    }
+    if (fn == "strcpy" || fn == "strncpy") {
+        std::string s = readCString(a1); uint32_t n = (fn == "strncpy") ? a2 : (uint32_t)s.size() + 1;
+        for (uint32_t k = 0; k < n; k++) writeByte(a0 + k, k < s.size() ? (uint8_t)s[k] : 0, &rec);
+        say(fn + "(dest, \"" + s + "\")", "Copia la cadena apuntada por R1 en el buffer de R0; devuelve el destino en R0.");
+        return true;
+    }
+    if (fn == "strcat") {
+        std::string d = readCString(a0), s = readCString(a1);
+        for (size_t k = 0; k <= s.size(); k++) writeByte(a0 + (uint32_t)d.size() + (uint32_t)k, k < s.size() ? (uint8_t)s[k] : 0, &rec);
+        say("strcat(dest, \"" + s + "\")", "Anade la cadena de R1 al final de la de R0; devuelve el destino en R0.");
+        return true;
+    }
+    if (fn == "strcmp" || fn == "strncmp") {
+        std::string x = readCString(a0), y = readCString(a1); int c = (fn == "strncmp") ? std::strncmp(x.c_str(), y.c_str(), a2) : std::strcmp(x.c_str(), y.c_str());
+        ret((uint32_t)(c < 0 ? -1 : c > 0 ? 1 : 0)); say(fn + "(\"" + x + "\", \"" + y + "\")", "Compara las dos cadenas: <0, 0 o >0 en R0.");
+        return true;
+    }
+    if (fn == "strchr") {
+        std::string x = readCString(a0); size_t p = (a1 & 0xFF) == 0 ? x.size() : x.find((char)(a1 & 0xFF));
+        ret(p == std::string::npos ? 0u : a0 + (uint32_t)p); say("strchr(s, c)", "Busca el caracter R1 en la cadena R0: puntero a el, o 0 si no esta.");
+        return true;
+    }
+    if (fn == "memcpy" || fn == "memmove") {
+        std::vector<uint8_t> tmp(a2); for (uint32_t k = 0; k < a2; k++) tmp[k] = readByte(a1 + k);
+        for (uint32_t k = 0; k < a2; k++) writeByte(a0 + k, tmp[k], &rec);
+        say(fn + "(dest, src, n)", "Copia R2 bytes de R1 a R0; devuelve el destino.");
+        return true;
+    }
+    if (fn == "memset") { for (uint32_t k = 0; k < a2; k++) writeByte(a0 + k, (uint8_t)a1, &rec); say("memset(p, c, n)", "Rellena R2 bytes desde R0 con el valor de R1; devuelve R0."); return true; }
+    if (fn == "memcmp") {
+        int c = 0; for (uint32_t k = 0; k < a2 && !c; k++) c = (int)readByte(a0 + k) - (int)readByte(a1 + k);
+        ret((uint32_t)(c < 0 ? -1 : c > 0 ? 1 : 0)); say("memcmp(a, b, n)", "Compara R2 bytes de R0 y R1."); return true;
+    }
+    if (fn == "abs") { int32_t v = (int32_t)a0; ret((uint32_t)(v < 0 ? -v : v)); say("abs(R0)", "Valor absoluto de R0."); return true; }
+    if (fn == "toupper") { ret(a0 >= 'a' && a0 <= 'z' ? a0 - 32 : a0); say("toupper(R0)", "Mayuscula del caracter de R0."); return true; }
+    if (fn == "tolower") { ret(a0 >= 'A' && a0 <= 'Z' ? a0 + 32 : a0); say("tolower(R0)", "Minuscula del caracter de R0."); return true; }
+    if (fn == "isdigit") { ret(a0 >= '0' && a0 <= '9'); say("isdigit(R0)", "1 si R0 es una cifra; 0 si no."); return true; }
+    if (fn == "isalpha") { ret((a0 >= 'a' && a0 <= 'z') || (a0 >= 'A' && a0 <= 'Z')); say("isalpha(R0)", "1 si R0 es una letra; 0 si no."); return true; }
+    if (fn == "isalnum") { ret((a0 >= 'a' && a0 <= 'z') || (a0 >= 'A' && a0 <= 'Z') || (a0 >= '0' && a0 <= '9')); say("isalnum(R0)", "1 si R0 es letra o cifra."); return true; }
+    if (fn == "isspace") { ret(a0 == ' ' || (a0 >= 9 && a0 <= 13)); say("isspace(R0)", "1 si R0 es un espacio en blanco."); return true; }
+    if (fn == "isupper") { ret(a0 >= 'A' && a0 <= 'Z'); say("isupper(R0)", "1 si R0 es mayuscula."); return true; }
+    if (fn == "islower") { ret(a0 >= 'a' && a0 <= 'z'); say("islower(R0)", "1 si R0 es minuscula."); return true; }
+    if (fn == "malloc" || fn == "calloc") {
+        uint32_t n = (fn == "calloc") ? a0 * a1 : a0; n = (n + 7) & ~7u; uint32_t p = heapNext_; heapNext_ += n ? n : 8;
+        if (fn == "calloc") for (uint32_t k = 0; k < n; k++) writeByte(p + k, 0, &rec);
+        ret(p); say(fn + "(...)", "Reserva memoria en el monton simulado (desde 0x08000000); devuelve el puntero en R0."); return true;
+    }
+    if (fn == "fputs") { std::string x = readCString(a0); output += x; ret(1); say("fputs(\"" + x + "\", f)", "Escribe la cadena de R0 por consola (sin salto de linea)."); return true; }
+    if (fn == "fprintf" || fn == "snprintf") {
+        bool sn = fn == "snprintf";
+        std::string fmt = readCString(sn ? a2 : a1); int argi = sn ? 3 : 2;
+        auto nextArg = [&]() -> uint32_t { uint32_t v = (argi <= 3) ? r[argi] : readWord(r[13] + 4u * (uint32_t)(argi - 4)); argi++; return v; };
+        std::string outp = cFormat(*this, fmt, nextArg);
+        if (!sn) { output += outp; ret((uint32_t)outp.size()); say("fprintf(f, \"" + fmt + "\", ...)", "Como printf (stdout y stderr salen por la misma consola)."); return true; }
+        if (a1) { std::string t = outp.substr(0, a1 - 1); for (size_t k = 0; k < t.size(); k++) writeByte(a0 + (uint32_t)k, (uint8_t)t[k], &rec); writeByte(a0 + (uint32_t)t.size(), 0, &rec); }
+        ret((uint32_t)outp.size()); say("snprintf(buf, n, \"" + fmt + "\", ...)", "Como sprintf pero escribe como mucho n-1 caracteres."); return true;
+    }
+    if (fn == "time") { uint32_t t = 1700000000u + (uint32_t)steps; if (a0) writeWord(a0, t, &rec); ret(t); say("time(NULL)", "Hora simulada (segundos); crece con las instrucciones ejecutadas."); return true; }
+    if (fn == "fflush") { ret(0); say("fflush(f)", "Vacia el bufer de salida: el simulador ya escribe todo al momento."); return true; }
+    if (fn == "fgets") {
+        if (!hasPendingLine() || a1 == 0) { ret(0); say("fgets(buf, n, stdin)", "Fin de la entrada: devuelve NULL."); return true; }
+        std::string line = takeLine();
+        if (line.size() > a1 - 1) line.resize(a1 - 1); else line += '\n';
+        for (size_t k = 0; k < line.size(); k++) writeByte(a0 + (uint32_t)k, (uint8_t)line[k], &rec);
+        writeByte(a0 + (uint32_t)line.size(), 0, &rec);
+        ret(a0); say("fgets(buf, n, stdin)", "Lee una linea de la consola (con su salto de linea, maximo n-1 caracteres) y la guarda en R0.");
+        return true;
+    }
+    if (fn == "free") { say("free(p)", "Libera memoria (el simulador no la reutiliza)."); return true; }
+    if (fn == "srand") { randState_ = a0; say("srand(R0)", "Fija la semilla de rand()."); return true; }
+    if (fn == "rand") {
+        randState_ = randState_ * 1103515245u + 12345u; ret((randState_ >> 16) & 0x7FFF);
+        say("rand()", "Numero pseudoaleatorio (generador propio del simulador; no coincide con el de glibc)."); return true;
+    }
+    return false;
+}
+
 // Simula el efecto de una llamada "BL printf/scanf/puts/gets/strlen" (convenio AAPCS:
 // argumentos en R0..R3; printf/scanf usan R0 como formato y R1..R3 como argumentos).
 void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
     lastWasLibraryCall = true;
+    if (runExtraLibraryCall(fn, rec)) return;
     if (fn == "printf" || fn == "putchar" || fn == "exit" || fn == "atoi" || fn == "getchar") {
         if (fn == "putchar") {
             output += (char)(r[0] & 0xFF);
@@ -1261,7 +1515,7 @@ void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
             return;
         }
         if (fn == "getchar") {
-            char c = takeChar(); uint32_t old = r[0]; r[0] = (uint8_t)c; rec.regs.push_back({0, old, r[0]});
+            uint32_t old = r[0]; if (hasPendingChar()) r[0] = (uint8_t)takeChar(); else r[0] = 0xFFFFFFFFu; rec.regs.push_back({0, old, r[0]});
             rec.sym = "getchar()"; rec.text = "Lee un caracter de la consola y lo devuelve en R0.";
             return;
         }
@@ -1278,31 +1532,7 @@ void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
         std::string fmt = readCString(r[0]);
         int argi = 1;
         auto nextArg = [&]() -> uint32_t { uint32_t v = (argi <= 3) ? r[argi] : readWord(r[13] + 4u * (uint32_t)(argi - 4)); argi++; return v; };
-        std::string outp;
-        for (size_t i = 0; i < fmt.size(); i++) {
-            if (fmt[i] != '%' || i + 1 >= fmt.size()) { outp += fmt[i]; continue; }
-            size_t j = i + 1; std::string flags, width, prec; bool hasPrec = false;
-            while (j < fmt.size() && std::strchr("-+ 0#", fmt[j])) flags += fmt[j++];
-            while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) width += fmt[j++];
-            if (j < fmt.size() && fmt[j] == '.') { hasPrec = true; j++; while (j < fmt.size() && std::isdigit((unsigned char)fmt[j])) prec += fmt[j++]; }
-            while (j < fmt.size() && std::strchr("hlzjt", fmt[j])) j++;      // modificadores de longitud: todo es de 32 bits
-            if (j >= fmt.size()) { outp += fmt.substr(i); break; }
-            char c = fmt[j]; std::string spec = "%" + flags + width + (hasPrec ? "." + (prec.empty() ? std::string("0") : prec) : std::string());
-            char buf[512]; buf[0] = 0;
-            switch (c) {
-                case 'd': case 'i': std::snprintf(buf, sizeof buf, (spec + "d").c_str(), (int)(int32_t)nextArg()); outp += buf; break;
-                case 'u': std::snprintf(buf, sizeof buf, (spec + "u").c_str(), (unsigned)nextArg()); outp += buf; break;
-                case 'x': std::snprintf(buf, sizeof buf, (spec + "x").c_str(), (unsigned)nextArg()); outp += buf; break;
-                case 'X': std::snprintf(buf, sizeof buf, (spec + "X").c_str(), (unsigned)nextArg()); outp += buf; break;
-                case 'o': std::snprintf(buf, sizeof buf, (spec + "o").c_str(), (unsigned)nextArg()); outp += buf; break;
-                case 'p': std::snprintf(buf, sizeof buf, "0x%x", (unsigned)nextArg()); outp += buf; break;
-                case 'c': std::snprintf(buf, sizeof buf, (spec + "c").c_str(), (int)(nextArg() & 0xFF)); outp += buf; break;
-                case 's': { std::string sv = readCString(nextArg()); std::snprintf(buf, sizeof buf, (spec + "s").c_str(), sv.substr(0, 400).c_str()); outp += buf; break; }
-                case '%': outp += '%'; break;
-                default: outp += fmt.substr(i, j - i + 1); break;
-            }
-            i = j;
-        }
+        std::string outp = cFormat(*this, fmt, nextArg);
         output += outp;
         uint32_t old = r[0]; r[0] = (uint32_t)outp.size(); rec.regs.push_back({0, old, r[0]});
         rec.sym = "printf(\"" + fmt + "\", ...)";
@@ -1310,22 +1540,27 @@ void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
         rec.text = "Llama a printf: interpreta el formato de R0 y los argumentos de R1-R3 (y de la pila a partir del cuarto): %d %i %u %x %X %o %c %s %p %% con anchura/relleno (%5d, %02x, %-8s...), y escribe el resultado por consola.";
     } else if (fn == "scanf") {
         std::string fmt = readCString(r[0]);
-        std::string line = takeLine();
-        std::istringstream iss(line);
-        int argi = 1, filled = 0;
-        for (size_t i = 0; i < fmt.size(); i++) {
-            if (fmt[i] == '%' && i + 1 < fmt.size() && argi <= 3) {
-                char c = fmt[++i]; uint32_t dest = r[argi++];
-                if (c == 'd') { int v = 0; if (iss >> v) { writeWord(dest, (uint32_t)v, &rec); filled++; } }
-                else if (c == 'u' || c == 'x') { unsigned v = 0; if (iss >> v) { writeWord(dest, (uint32_t)v, &rec); filled++; } }
-                else if (c == 's') { std::string s; if (iss >> s) { for (size_t k = 0; k < s.size(); k++) writeByte(dest + (uint32_t)k, (uint8_t)s[k], &rec); writeByte(dest + (uint32_t)s.size(), 0, &rec); filled++; } }
-                else if (c == 'c') { char ch; if (iss.get(ch)) { writeByte(dest, (uint8_t)ch, &rec); filled++; } }
-            }
+        std::vector<ScanItem> items; size_t np = inputPos_; bool more = false;
+        int filled = scanfParse(input_, inputPos_, fmt, items, np, more);
+        int argi = 1;
+        auto nextPtr = [&]() -> uint32_t { uint32_t v = (argi <= 3) ? r[argi] : readWord(r[13] + 4u * (uint32_t)(argi - 4)); argi++; return v; };
+        std::string got;
+        for (auto& it : items) {
+            uint32_t dest = nextPtr();
+            if (it.type == 's') { for (size_t k = 0; k < it.str.size(); k++) writeByte(dest + (uint32_t)k, (uint8_t)it.str[k], &rec); writeByte(dest + (uint32_t)it.str.size(), 0, &rec); got += " \"" + it.str + "\""; }
+            else if (it.type == 'c') { writeByte(dest, (uint8_t)it.str[0], &rec); got += " '" + it.str + "'"; }
+            else if (it.size == 1) { writeByte(dest, (uint8_t)it.num, &rec); got += " " + std::to_string(it.num); }
+            else if (it.size == 2) { writeByte(dest, (uint8_t)it.num, &rec); writeByte(dest + 1, (uint8_t)(it.num >> 8), &rec); got += " " + std::to_string(it.num); }
+            else { writeWord(dest, (uint32_t)it.num, &rec); got += " " + std::to_string(it.num); }
         }
-        uint32_t old = r[0]; r[0] = (uint32_t)filled; rec.regs.push_back({0, old, (uint32_t)filled});
+        std::string consumed = input_.substr(inputPos_, np - inputPos_);
+        inputPos_ = np;
+        int32_t result = filled; if (filled == 0 && np >= input_.size() && eof_) result = -1;   // EOF
+        uint32_t old = r[0]; r[0] = (uint32_t)result; rec.regs.push_back({0, old, (uint32_t)result});
         rec.sym = "scanf(\"" + fmt + "\", ...)";
-        rec.num = "entrada: \"" + line + "\"";
-        rec.text = "Lee una linea de la consola (\"" + line + "\") y rellena, segun el formato, los punteros pasados en R1-R3; R0 recibe cuantos valores se han leido (" + std::to_string(filled) + ").";
+        std::string vis; for (char ch : consumed) { if (ch == '\n') vis += "\\n"; else vis += ch; }
+        rec.num = "consume \"" + vis + "\"";
+        rec.text = "Lee de la entrada solo lo que casa con el formato y guarda el resultado en los punteros R1-R3" + (got.empty() ? std::string(" (no se pudo leer ningun valor)") : ":" + got) + ". R0 = numero de valores leidos (" + std::to_string(result) + "). Lo que sobra queda para la siguiente lectura.";
     } else if (fn == "puts") {
         std::string s = readCString(r[0]);
         output += s + "\n";
@@ -1333,6 +1568,7 @@ void Machine::runLibraryCall(const std::string& fn, StepRecord& rec) {
         rec.sym = "puts(\"" + s + "\")";
         rec.text = "Escribe la cadena apuntada por R0 y un salto de linea por consola.";
     } else if (fn == "gets") {
+        if (!hasPendingLine()) { uint32_t old = r[0]; r[0] = 0; rec.regs.push_back({0, old, 0}); rec.sym = "gets(buf)"; rec.text = "Fin de la entrada: devuelve NULL."; return; }
         std::string line = takeLine(); uint32_t a = r[0];
         for (size_t k = 0; k < line.size(); k++) writeByte(a + (uint32_t)k, (uint8_t)line[k], &rec);
         writeByte(a + (uint32_t)line.size(), 0, &rec);
@@ -1366,11 +1602,15 @@ std::optional<StepRecord> Machine::step() {
     if (ins.t == IType::BR && condPass(ins.cond, f)) {
         uint32_t tgt = (uint32_t)((int32_t)(pc + 8) + ins.branchOffsetWords * 4);
         const char* fn = libraryFunctionName(tgt);
-        if (fn && std::string(fn) == "getchar" && !hasPendingChar()) {
+        if (fn && std::string(fn) == "scanf" && !eof_ && scanfNeedsMore(readCString(r[0]))) {
+            halt("Esperando datos de entrada para scanf(). Escribelos en la consola y pulsa Enter.", "input");
+            return std::nullopt;
+        }
+        if (fn && std::string(fn) == "getchar" && !hasPendingChar() && !eof_) {
             halt("Esperando un caracter de entrada para getchar(). Escribelo en la consola.", "input");
             return std::nullopt;
         }
-        if (fn && (std::string(fn) == "scanf" || std::string(fn) == "gets") && !hasPendingLine()) {
+        if (fn && (std::string(fn) == "gets" || std::string(fn) == "fgets") && !hasPendingLine() && !eof_) {
             halt("Esperando una linea de entrada para " + std::string(fn) + "(). Escribela en la consola y pulsa Enter.", "input");
             return std::nullopt;
         }
@@ -1519,7 +1759,7 @@ std::optional<StepRecord> Machine::step() {
         case IType::BLK: {
             bool P,U; translateBlockMode(ins.blkMode, ins.load, P, U);
             int count=0; for (int i=0;i<16;i++) if (ins.regList & (1u<<i)) count++;
-            uint32_t base = r[13];
+            uint32_t base = r[ins.blkBase];
             uint32_t addr0 = U ? base : base - (uint32_t)count*4;
             uint32_t cur = addr0 + ((P == U) ? 4u : 0u);
             std::vector<std::string> names;
@@ -1531,10 +1771,10 @@ std::optional<StepRecord> Machine::step() {
                 cur += 4;
             }
             uint32_t newBase = U ? base + (uint32_t)count*4 : base - (uint32_t)count*4;
-            uint32_t oldBase = r[13]; r[13]=newBase; if (oldBase!=newBase) rec.regs.push_back({13, oldBase, newBase});
+            if (ins.blkWb && !(ins.load && (ins.regList & (1u<<ins.blkBase)))) { uint32_t oldBase = r[ins.blkBase]; r[ins.blkBase]=newBase; if (oldBase!=newBase) rec.regs.push_back({ins.blkBase, oldBase, newBase}); }
             std::string list; for (size_t i=0;i<names.size();i++){ if(i) list+=", "; list+=names[i]; }
             rec.sym = (ins.load? std::string("carga "):std::string("guarda ")) + "{" + list + "}";
-            rec.text = ins.isStack ? (ins.load? "POP: recupera los registros y avanza SP." : "PUSH: guarda los registros y retrocede SP.") : (ins.load? "Carga multiple desde memoria.":"Almacenamiento multiple en memoria.");
+            rec.text = ins.isStack ? (ins.load? "POP: recupera los registros y avanza SP." : "PUSH: guarda los registros y retrocede SP.") : (ins.load? "Carga multiple desde memoria (base " + regLabel(ins.blkBase) + (ins.blkWb?" con actualizacion).":")."):"Almacenamiento multiple en memoria (base " + regLabel(ins.blkBase) + (ins.blkWb?" con actualizacion).":")."));
             break;
         }
         case IType::SWI: {

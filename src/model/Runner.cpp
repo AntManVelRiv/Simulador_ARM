@@ -84,7 +84,12 @@ RunResult runProgram(const Program& prog, const RunOptions& opt, std::istream& i
             flush();
             if (m.haltKind != "input") break;
             std::string line; std::istream& src = opt.useStdinText ? (std::istream&)sin : in;
-            if (!std::getline(src, line)) { res.error = "el programa pide entrada pero no hay mas datos (fin de la entrada)"; break; }
+            if (!std::getline(src, line)) {
+                // Fin de la entrada: scanf/getchar/fgets/gets devuelven EOF/NULL como en C. Si aun asi vuelve a
+                // quedarse esperando (lectura con SWI), no hay nada mas que hacer.
+                if (m.eofSignaled()) { res.error = "el programa pide entrada pero no hay mas datos (fin de la entrada)"; break; }
+                m.signalEof(); continue;
+            }
             m.feedInput(line + "\n"); continue;
         }
         auto rec = m.step();
