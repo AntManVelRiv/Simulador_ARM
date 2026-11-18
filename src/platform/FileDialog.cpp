@@ -78,7 +78,9 @@ static int runCapture(const std::string& cmd, std::string& out) {
 enum class Tool { None, Zenity, KDialog, Yad, Osascript };
 static Tool detectTool() {
     static Tool t = [] {
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+        return Tool::None;      // no hay zenity/kdialog: se usa el explorador de archivos interno
+#elif defined(__APPLE__)
         return commandExists("osascript") ? Tool::Osascript : Tool::None;
 #else
         // Sin sesión gráfica no hay diálogo posible

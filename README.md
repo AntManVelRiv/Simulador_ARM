@@ -7,14 +7,19 @@ Aplicación de escritorio nativa en C++ para ensamblar y ejecutar programas ARMv
 - **Ensamblador de dos pasadas** y **emulador de CPU** ARMv4: instrucciones de procesado de datos (con todos los códigos de condición, sufijo `S` y desplazamientos), acceso a memoria (`LDR`/`STR`/`LDRB`/`STRB`/`LDRH`/`STRH`/`LDRSB`/`LDRSH`, con offset/pre/post-indexado y registro+shift), `LDM`/`STM`/`PUSH`/`POP`, saltos (`B`/`BL`/`BX`), multiplicación de 32 y 64 bits, la pseudo-instrucción `LDR Rd, =valor` y las directivas `.text .data .word .byte .space .ascii .asciz .equ .org .end`.
 - **Entrada/salida real por consola**: el programa puede leer enteros, caracteres y cadenas (bloqueando la ejecución hasta que el usuario escribe algo) e imprimir texto, caracteres, enteros y hexadecimales — no es solo una demo educativa con programas fijos, se pueden escribir programas interactivos de propósito general.
 - **Depuración completa**: paso a paso, paso atrás (deshacer), ejecución continua a velocidad ajustable, puntos de parada por línea, pila de llamadas, inspector de memoria con edición directa (por byte/media palabra/palabra, en cualquier dirección), registros editables, flags editables a mano.
+- **Tres tipos de procesador a simular** (menú **Procesador**, selector de la barra de herramientas o del panel *Camino de datos*): **monociclo** (por defecto), **multiciclo** y **segmentado** con un **número de etapas configurable** (2–10, por defecto 5: BI, LR, E, M, ER). El camino de datos y el diagrama de ejecución cambian con el procesador; ver [Procesadores simulados](#procesadores-simulados).
 - **Camino de datos animado**: cada instrucción ejecutada ilumina en tiempo real las etapas (búsqueda, decodificación, ejecución, memoria, escritura) sobre el diagrama de la CPU.
 - **Codificación en vivo**: cualquier instrucción se descompone campo a campo (cond, opcode, registros, inmediato...) con explicación de cada uno.
 - **Totalmente personalizable**: 6 temas de color predefinidos ("futuristas": neón cian, ámbar terminal, violeta synth, matrix, carmesí, y un tema claro), edición de cada color, tamaño de texto, redondeo de bordes, opacidad, velocidad y activación de animaciones, rejilla y pulsos de fondo tipo "placa de circuito", líneas de barrido CRT.
 - **Mapa de memoria configurable**: puedes elegir en qué dirección empieza el código, los datos y la pila, precargar bloques de memoria arbitrarios y fijar valores iniciales de cualquier registro antes de ejecutar.
-- **Ventanas acoplables** (arrástralas, apílalas en pestañas, sepáralas en su propia ventana): Editor, Código máquina, Registros, Instrucción actual, Camino de datos, Memoria, Pila, Traza, Consola, Símbolos, Codificador, Mapa de memoria, Referencia — todas activables/desactivables desde el menú **Ver**, con la disposición restaurable a la de fábrica en cualquier momento.
+- **Ventanas acoplables** (arrástralas, apílalas en pestañas, sepáralas en su propia ventana): Editor, Código máquina, Registros, Instrucción actual, Camino de datos, Ciclos y segmentación, Memoria, Pila, Traza, Consola, Símbolos, Codificador, Mapa de memoria, Referencia — todas activables/desactivables desde el menú **Ver**, con la disposición restaurable a la de fábrica en cualquier momento.
 
 ## Novedades
 
+- **Elección del procesador: monociclo, multiciclo o segmentado** (ver [Procesadores simulados](#procesadores-simulados)). El
+  segmentado reproduce la unidad completa con gestión de riesgos (figura 7.58 de Harris & Harris) con 5 etapas por defecto
+  y permite elegir de 2 a 10, con o sin anticipación. Nuevo panel **Ciclos y segmentación** con el diagrama de ejecución
+  (instrucciones × ciclos), CPI, paradas, vaciados y anticipaciones. En la línea de órdenes: `--cpu`, `--stages`, `--no-forward`, `--stats`.
 - **`MUL`/`MLA`/`SMULL`...: `Rd` puede ser el mismo registro que `Rm`, `Rs` o `Rn`** (`MUL R1, R1, R2` ya ensambla). El
   emulador lee los operandos antes de escribir el resultado. Siguen siendo errores: usar `PC` como operando y
   `RdLo == RdHi` en las multiplicaciones largas (resultado impredecible incluso en ARM real).
@@ -105,7 +110,84 @@ El ensamblador, el emulador, el modelo y el controlador no dependen de ninguna l
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target armsim_tests
-./build/armsim_tests     # ~200 comprobaciones automáticas
+./build/armsim_tests     # ~1300 comprobaciones automáticas
+```
+
+## Android (APK universal)
+
+El proyecto incluye un port a Android (SDL2 + OpenGL ES 3) en [`android/`](android/). Genera **un único APK universal** que
+contiene las cuatro arquitecturas (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`), así que sirve para cualquier móvil, tablet
+o emulador con Android 8.0 o superior.
+
+**Opción A — en la nube, sin instalar nada (recomendada)**: Abre la pestaña **Actions →
+«APK Android (universal)» → Run workflow** y descarga **`ARMSim-universal-apk`** desde *Artifacts*.
+
+**Opción B — en tu equipo**: necesitas JDK 17 y el SDK de Android (basta con las *command-line tools*, con `ANDROID_HOME`
+definido y las licencias aceptadas con `sdkmanager --licenses`); Gradle descarga solo el NDK y CMake.
+
+```bash
+bash android/build-apk.sh        # genera ARMSim-universal.apk en la carpeta del proyecto
+adb install -r ARMSim-universal.apk
+```
+
+Instalación sin `adb`: copia el `.apk` al dispositivo y ábrelo (hay que permitir «instalar apps desconocidas» para el
+navegador o el administrador de archivos). El APK se firma con la clave de depuración; para publicarlo en Google Play,
+fírmalo con tu propia clave. Los programas se guardan en la carpeta de la aplicación (`Android/data/com.armsim.app/files`).
+
+Notas de uso en pantalla táctil: la interfaz es la misma que en escritorio (pensada para tablets o móviles en horizontal);
+el tamaño del texto se ajusta solo a la densidad de pantalla la primera vez (cámbialo en *Personalizar*), se usan los
+botones de la barra (no las teclas `F5`/`F10`), el teclado en pantalla aparece al tocar el editor o la consola, y se
+desplaza arrastrando las barras de desplazamiento. En Android el ahorro de energía está activado por defecto.
+
+**Abrir archivos y editar en Android**
+
+- **Archivo → Abrir...** muestra el administrador de archivos de Android (Descargas, Drive, tarjeta SD...). El programa
+  elegido se copia a `Android/data/com.armsim.app/files/importados/` y se abre desde esa copia; **Guardar** escribe en la
+  copia, no en el original (para guardar en otro sitio usa *Guardar como...*). «Abrir con el explorador interno...» sigue
+  disponible.
+- **Editor de código**: al tocarlo aparece el teclado del móvil para escribir (sin autocorrección, para que cada letra
+  entre al instante). Como el teclado no tiene `Ctrl`, encima del editor hay botones **Copiar, Cortar, Pegar, Todo,
+  Deshacer y Rehacer** (el mismo conjunto está en el menú **Editar**). Para copiar, selecciona arrastrando el dedo o con
+  doble toque sobre una palabra.
+- En Android 11 o superior la disposición se encoge sola para que el teclado no tape el editor; en versiones anteriores
+  el teclado puede tapar la parte baja de la pantalla.
+- `android/fetch-sdl.sh` aplica un pequeño ajuste al `SDLActivity.java` de SDL2 (tipo de entrada del teclado); se aplica
+  solo al descargar SDL2 y es idempotente.
+
+## Procesadores simulados
+
+El **resultado de un programa es idéntico en los tres procesadores** (el emulador funcional `Machine` es la única fuente de
+verdad, y las pruebas lo comprueban con todos los ejemplos, con 2–10 etapas y con/sin anticipación); lo que cambia es
+**cuándo** ocurre cada cosa: ciclos, CPI y lo que se ve en el camino de datos. Cambiar de procesador **reinicia la simulación**.
+Con multiciclo/segmentado, *Paso* (`F10`) avanza **un ciclo de reloj** y *Ejecutar* corre a *ciclos/s*.
+
+| Procesador | Ciclos de una instrucción | Camino de datos |
+|---|---|---|
+| **Monociclo** (por defecto) | 1 | bloques animados (como siempre) |
+| **Multiciclo** | las etapas que necesite: datos 4 (BI, LR, E, ER), `LDR` 5 (+M), `STR` 4, salto 3, `CMP` 3, `LDM`/`STM`/`PUSH`/`POP` 1 ciclo de M por registro; condición no cumplida: 3 | los mismos bloques + máquina de estados BI→LR→E→M→ER |
+| **Segmentado** (2–10 etapas, 5 por defecto) | CPI ideal = 1 | figura 7.58: registros de segmentación F/D, D/E, E/M, M/W, anticipación y **unidad de riesgos** con sus señales (`StallF/D`, `FlushD/E`, `ForwardAE/BE`, `Match`, `RegWriteM/W`, `MemtoRegE`, `BranchTkE`) |
+
+**Segmentado — qué se modela**
+
+- **Etapas**: con 5 son `BI · LR · E · M · ER`. Con menos se fusionan (2: `BI | LR+E+M+ER`; 3: `BI | LR | E+M+ER`; 4: `BI | LR | E | M+ER`);
+  con más se parten por este orden: `E`, `M`, `BI`, `LR`, `ER` (6: `E1 E2`; 7: + `M1 M2`; 8: + `BI1 BI2`...).
+- **Riesgos de datos**: con *anticipación* (activada por defecto) el resultado de la ALU se envía desde M o ER a la instrucción
+  que lo necesita, y solo hay **parada** cuando el dato aún no existe (un `LDR` seguido de una instrucción que usa su destino: 1 ciclo
+  con 5 etapas). Sin anticipación, la instrucción dependiente espera a que el dato se escriba en el banco (2 ciclos con 5 etapas).
+- **Riesgos de control**: se capta siempre la instrucción siguiente (predicción «no tomado»). Un **salto tomado** (`B`/`BL`/`BX`) se
+  resuelve al final de E y **anula** las instrucciones captadas por el camino equivocado (2 ciclos perdidos con 5 etapas; más
+  etapas = más penalización). Las escrituras del PC que no son saltos (`MOV PC, LR`, `LDR PC`, `POP {PC}`) se resuelven en ER.
+- **Convenio**: la instrucción modifica registros, flags y memoria cuando pasa por la **última etapa de E**, que es cuando la ALU
+  ya tiene el resultado y se decide el salto. El paso atrás deshace ciclos completos.
+- **Puntos de parada** en segmentado: se detiene cuando la instrucción marcada entra en la tubería (etapa BI).
+
+Ejemplos con `armsim-cli programa.s --stats`:
+
+```bash
+armsim-cli programa.s --cpu multi --stats          # multiciclo
+armsim-cli programa.s --cpu pipe --stats           # segmentado de 5 etapas con anticipación
+armsim-cli programa.s --stages 8 --stats           # segmentado de 8 etapas (implica --cpu pipe)
+armsim-cli programa.s --cpu pipe --no-forward --stats
 ```
 
 ## Arquitectura del código (Modelo-Vista-Controlador)
@@ -114,6 +196,7 @@ cmake --build build --target armsim_tests
 src/
 ├── model/            MODELO — no depende de ImGui/SDL, se puede probar sin interfaz
 │   ├── Arm.h/.cpp        ensamblador + emulador de CPU ARMv4
+│   ├── Cpu.h/.cpp        modelo de ciclos: monociclo, multiciclo y segmentado de k etapas (riesgos, anticipación, vaciado)
 │   ├── Settings.h/.cpp   preferencias, temas y su persistencia en disco
 │   ├── Examples.h/.cpp   programas de ejemplo incluidos
 │   ├── Runner.h/.cpp     ejecución sin interfaz (--call, entrada simulada...)
@@ -127,9 +210,10 @@ src/
 │   ├── Panels.h            declaración de todas las ventanas
 │   ├── panels/             una implementación por grupo de ventanas
 │   └── FontData.cpp        fuente JetBrains Mono incrustada en el binario
+├── android/          port a Android: Gradle + CMake (APK universal), scripts y manifiesto
 └── main.cpp          raíz de composición: crea SDL/OpenGL/ImGui y arranca el bucle principal
 
-tests/tests.cpp       pruebas del modelo y del controlador (sin GUI): ~200 comprobaciones
+tests/tests.cpp       pruebas del modelo y del controlador (sin GUI): ~1300 comprobaciones
 third_party/          Dear ImGui (rama docking) e ImGuiColorTextEdit, vendorizados como fuente
 assets/fonts/         JetBrains Mono (licencia OFL, incluida)
 install-deps.sh       instala las dependencias en cualquier Linux (detecta apt/dnf/zypper/pacman/apk)
@@ -204,4 +288,4 @@ Si partes de una copia antigua del proyecto o tocas el `CMakeLists.txt`/el flujo
 
 ## Atajos de teclado
 
-`F5` ejecutar/pausar · `Mayús+F5` reiniciar · `F10`/`F11` paso · `Alt+←` paso atrás · `F7` ensamblar · `F9` punto de parada en la línea del cursor · `Ctrl+O` abrir · `Ctrl+S` guardar · `Ctrl +` / `Ctrl -` tamaño del texto.
+`F5` ejecutar/pausar · `Mayús+F5` reiniciar · `F10`/`F11` paso (un ciclo en multiciclo/segmentado) · `Alt+←` paso atrás · `F7` ensamblar · `F9` punto de parada en la línea del cursor · `Ctrl+O` abrir · `Ctrl+S` guardar · `Ctrl +` / `Ctrl -` tamaño del texto.

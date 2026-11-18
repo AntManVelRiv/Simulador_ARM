@@ -1,6 +1,7 @@
-// view/panels/CodePanels.cpp — Editor, código máquina, instrucción actual y camino de datos
+// view/panels/CodePanels.cpp — Editor, código máquina e instrucción actual
 #include "view/Panels.h"
 #include "view/Theme.h"
+#include "imgui_internal.h"
 #include <cmath>
 #include <set>
 #include <algorithm>
@@ -37,6 +38,47 @@ void EditorPanel::configureLanguage() {
     ed_.SetShowWhitespaces(false);
 }
 
+// ---- Edición con el teclado del móvil -------------------------------------------------------
+// El teclado en pantalla no tiene Ctrl, así que copiar/pegar se hace con estos botones (y con el menú «Editar»).
+void EditorPanel::applyEditCommand(EditCmd cmd) {
+    switch (cmd) {
+        case EditCmd::Undo: ed_.Undo(); break;
+        case EditCmd::Redo: ed_.Redo(); break;
+        case EditCmd::Cut: ed_.Cut(); break;
+        case EditCmd::Copy: ed_.Copy(); break;
+        case EditCmd::Paste: ed_.Paste(); break;
+        case EditCmd::SelectAll: ed_.SelectAll(); break;
+        case EditCmd::None: break;
+    }
+}
+
+void EditorPanel::editToolbar(ViewContext& c) {
+    struct Item { const char* label; EditCmd cmd; bool enabled; };
+    const Item items[] = {
+        {"Copiar", EditCmd::Copy, ed_.HasSelection()}, {"Cortar", EditCmd::Cut, ed_.HasSelection()},
+        {"Pegar", EditCmd::Paste, true}, {"Todo", EditCmd::SelectAll, true},
+        {"Deshacer", EditCmd::Undo, ed_.CanUndo()}, {"Rehacer", EditCmd::Redo, ed_.CanRedo()},
+    };
+    bool first = true;
+    for (const Item& it : items) {
+        if (!first) ImGui::SameLine();
+        first = false;
+        ImGui::BeginDisabled(!it.enabled);
+        if (ImGui::Button(it.label)) c.vs.editCmd = it.cmd;
+        ImGui::EndDisabled();
+    }
+}
+
+// ImGui solo avisa a SDL de que muestre el teclado cuando un widget marca PlatformImeData.WantVisible; el editor de
+// código (ImGuiColorTextEdit) no es un InputText, así que lo marcamos nosotros mientras el usuario lo esté usando.
+void EditorPanel::requestSoftKeyboard() {
+    ImGuiPlatformImeData& ime = ImGui::GetCurrentContext()->PlatformImeData;
+    ime.WantVisible = ime.WantTextInput = true;
+    ime.ViewportId = ImGui::GetMainViewport()->ID;
+    ime.InputPos = ImGui::GetWindowPos();               // fijo: así SDL_StartTextInput se llama solo al cambiar de estado
+    ime.InputLineHeight = ImGui::GetTextLineHeight();
+}
+
 void EditorPanel::content(ViewContext& c) {
     const SimModel& m = c.model;
     // ---- el modelo manda: si el texto se cargó desde fuera (archivo, ejemplo), se recarga el editor
@@ -53,9 +95,30 @@ void EditorPanel::content(ViewContext& c) {
     auto cp = ed_.GetCursorPosition(); c.vs.editorCursorLine = cp.mLine + 1;
     ImGui::TextDisabled("Lín %d, Col %d  |  %d líneas  |  %s%s", cp.mLine + 1, cp.mColumn + 1, ed_.GetTotalLines(),
         m.settings().lastFile.empty() ? "(sin archivo)" : m.settings().lastFile.c_str(), m.isDirty() ? "  *modificado" : "");
+    if (platform::isAndroid()) editToolbar(c);
     const auto& errs = m.program().errors;
     float errH = errs.empty() ? 0.0f : std::min(110.0f * c.ui().fontScale, ImGui::GetTextLineHeightWithSpacing() * (1 + (float)errs.size()) + 8);
+
+    // Al aparecer/desaparecer el teclado el editor cambia de tamaño: se vuelve a mostrar la línea del cursor
+    if (std::fabs(c.vs.kbInset - prevKbInset_) > 1.0f) {
+        prevKbInset_ = c.vs.kbInset;
+        TextEditor::Coordinates cur = ed_.GetCursorPosition();
+        ed_.SetCursorPosition(TextEditor::Coordinates(0, 0)); ed_.SetCursorPosition(cur);   // (solo mueve el scroll si cambia la posición)
+    }
+    if (c.vs.refocusEditor) { c.vs.refocusEditor = false; ImGui::SetNextWindowFocus(); }   // tras un botón/menú: el foco vuelve al editor
+    const ImVec2 e0 = ImGui::GetCursorScreenPos(), avail = ImGui::GetContentRegionAvail();
+    const ImVec2 e1(e0.x + avail.x, e0.y + std::max(avail.y - errH - 2, 0.0f));
+
     ed_.Render("##code", ImVec2(0, -errH - 2), false);
+
+    // Tocar el editor muestra el teclado (también si se había cerrado con «Atrás»)
+    if (platform::isAndroid()) {
+        if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(e0, e1) && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) { kbWanted_ = true; platform::showSoftKeyboard(); }
+        if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)) kbWanted_ = false;       // otro panel tiene el foco: fuera teclado
+        if (kbWanted_) requestSoftKeyboard();
+    }
+    // Órdenes de edición pendientes (se aplican DESPUÉS de dibujar para que el controlador se entere del cambio de texto)
+    if (c.vs.editCmd != EditCmd::None) { applyEditCommand(c.vs.editCmd); c.vs.editCmd = EditCmd::None; c.vs.refocusEditor = true; }
     if (ed_.IsTextChanged()) c.ctrl.editorChanged(ed_.GetText());     // la vista informa; el controlador actualiza el modelo
     if (!errs.empty()) {
         Pal p(c.ui().col);
@@ -170,52 +233,4 @@ void InstructionPanel::content(ViewContext& c) {
 }
 
 // -------------------------------- Camino de datos ---------------------------------
-void DatapathPanel::content(ViewContext& c) {
-    const SimModel& m = c.model; const UiPrefs& ui = c.ui(); Pal pal(ui.col);
-    ImVec2 avail = ImGui::GetContentRegionAvail(); avail.y = std::max(avail.y, 200.0f * ui.fontScale);
-    ImVec2 o = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##cpu", avail);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    struct Blk { const char* id; float x, y, w, h; const char* label; };
-    static const Blk B[] = {{"PC",.02f,.40f,.08f,.16f,"PC"},{"IM",.14f,.30f,.16f,.36f,"Memoria\ninstruc."},{"IR",.34f,.40f,.07f,.16f,"IR"},{"UC",.34f,.05f,.30f,.16f,"Unidad de control"},
-        {"RF",.46f,.30f,.15f,.36f,"Banco de\nregistros"},{"ALU",.66f,.30f,.10f,.36f,"ALU"},{"FL",.66f,.74f,.10f,.14f,"NZCV"},{"DM",.82f,.30f,.15f,.36f,"Memoria\ndatos"}};
-    auto rect = [&](const char* id, ImVec2& a, ImVec2& b) { for (auto& k : B) if (!std::strcmp(k.id, id)) { a = ImVec2(o.x + k.x * avail.x, o.y + k.y * avail.y); b = ImVec2(a.x + k.w * avail.x, a.y + k.h * avail.y); return; } };
-    auto center = [&](const char* id) { ImVec2 a, b; rect(id, a, b); return ImVec2((a.x + b.x) / 2, (a.y + b.y) / 2); };
-    std::set<std::string> hot; std::vector<std::pair<std::string, std::string>> arrows;
-    const float T = 0.6f; std::string stageName = "En reposo";
-    const StepRecord* last = m.lastStep();
-    if (last && ui.anim() && c.vs.stageT < 1e8f) {
-        int stage = (int)(c.vs.stageT / T); float frac = std::fmod(c.vs.stageT, T) / T; (void)frac;
-        auto t = last->ins.t; bool ex = last->executed;
-        if (stage == 0) { hot = {"PC","IM","IR"}; arrows = {{"PC","IM"},{"IM","IR"}}; stageName = "1. Búsqueda (fetch): PC -> memoria -> IR"; }
-        else if (stage == 1) { hot = {"IR","UC","RF"}; arrows = {{"IR","UC"},{"IR","RF"}}; stageName = "2. Decodificación: la unidad de control lee IR"; }
-        else if (stage == 2) { if (!ex) { hot = {"UC"}; stageName = "3. Condición no cumplida: instrucción anulada"; } else { hot = {"RF","ALU"}; arrows = {{"RF","ALU"}}; if (t == IType::DP) hot.insert("FL"); stageName = (t == IType::BR || t == IType::BX) ? "3. Cálculo de la dirección de salto" : "3. Ejecución en la ALU"; } }
-        else if (stage == 3) { if (ex && (t == IType::MEM || t == IType::BLK)) { hot = {"ALU","DM"}; arrows = {{"ALU","DM"}}; stageName = "4. Acceso a memoria de datos"; } else stage = 4; }
-        if (stage == 4) { if (ex && !last->regs.empty()) { hot = {"ALU","RF"}; arrows = {{"ALU","RF"}}; if (t == IType::MEM && last->ins.load) { hot = {"DM","RF"}; arrows = {{"DM","RF"}}; } stageName = "5. Escritura del resultado en registros"; } else if (ex && (t == IType::BR || t == IType::BX)) { hot = {"ALU","PC"}; arrows = {{"ALU","PC"}}; stageName = "5. PC recibe la dirección de destino"; } else stage = 5; }
-        if (stage >= 5) { hot.clear(); arrows.clear(); stageName = "Instrucción completada"; }
-    }
-    float frac = std::fmod(c.vs.stageT, T) / T;
-    static const char* conns[][2] = {{"PC","IM"},{"IM","IR"},{"IR","UC"},{"IR","RF"},{"RF","ALU"},{"ALU","DM"},{"ALU","FL"},{"DM","RF"},{"ALU","PC"}};
-    for (auto& cn : conns) dl->AddLine(center(cn[0]), center(cn[1]), U32(withA(pal.accent, 0.22f)), 2.0f);
-    for (auto& ar : arrows) {
-        ImVec2 a = center(ar.first.c_str()), b = center(ar.second.c_str());
-        dl->AddLine(a, b, U32(withA(pal.accent2, 0.9f)), 3.0f);
-        ImVec2 pt(a.x + (b.x - a.x) * frac, a.y + (b.y - a.y) * frac);
-        dl->AddCircleFilled(pt, 10, U32(withA(pal.accent2, 0.18f))); dl->AddCircleFilled(pt, 5, U32(pal.accent2));
-    }
-    for (auto& k : B) {
-        ImVec2 a, b; rect(k.id, a, b); bool h = hot.count(k.id) > 0;
-        if (h) dl->AddRectFilled(ImVec2(a.x - 4, a.y - 4), ImVec2(b.x + 4, b.y + 4), U32(withA(pal.good, 0.12f)), 8);
-        dl->AddRectFilled(a, b, U32(h ? mixc(pal.panel, pal.good, 0.35f) : withA(mixc(pal.panel, pal.bg, 0.3f), 0.95f)), 6);
-        dl->AddRect(a, b, U32(h ? pal.good : withA(pal.accent, 0.6f)), 6, 0, h ? 2.5f : 1.5f);
-        ImVec2 ts = ImGui::CalcTextSize(k.label);
-        dl->AddText(ImVec2((a.x + b.x - ts.x) / 2, (a.y + b.y - ts.y) / 2), U32(pal.text), k.label);
-    }
-    if (const Machine* mc = m.machine()) {
-        char buf[64]; ImVec2 a, b;
-        std::snprintf(buf, sizeof buf, "PC=%s", hx0x(mc->pc).c_str()); rect("PC", a, b); dl->AddText(ImVec2(a.x, b.y + 4), U32(pal.accent2), buf);
-        if (last) { std::snprintf(buf, sizeof buf, "IR=%s", hex(last->ins.word).c_str()); rect("IR", a, b); dl->AddText(ImVec2(a.x - 20, b.y + 4), U32(pal.violet()), buf); }
-        std::snprintf(buf, sizeof buf, "N%d Z%d C%d V%d", mc->f.N, mc->f.Z, mc->f.C, mc->f.V); rect("FL", a, b); dl->AddText(ImVec2(a.x, b.y + 4), U32(pal.text), buf);
-    }
-    dl->AddText(ImVec2(o.x + 8, o.y + avail.y - ImGui::GetTextLineHeight() - 6), U32(pal.good), stageName.c_str());
-}
+// (El camino de datos y el panel de ciclos están en CpuPanels.cpp)

@@ -16,6 +16,7 @@ MainView::MainView(SimModel& model, SimController& ctrl) : model_(model), ctrl_(
     panels_.emplace_back(new StackPanel);    panels_.emplace_back(new TracePanel);    panels_.emplace_back(new OutputPanel);
     panels_.emplace_back(new SymbolsPanel);  panels_.emplace_back(new EncoderPanel);  panels_.emplace_back(new MemoryMapPanel);
     panels_.emplace_back(new ReferencePanel); panels_.emplace_back(new SettingsPanel); panels_.emplace_back(new AboutPanel);
+    panels_.emplace_back(new PipelinePanel);
     vs_.bootTime = ImGui::GetTime();
 }
 
@@ -35,7 +36,7 @@ void MainView::buildLayout() {
     auto dockW = [](PanelId id, ImGuiID node) { ImGui::DockBuilderDockWindow(panelTitle(id), node); };
     dockW(P_EDITOR, lTop); dockW(P_OUTPUT, lBot); dockW(P_TRACE, lBot);
     dockW(P_LISTING, mid); dockW(P_CPU, mid);
-    dockW(P_INSTR, bot); dockW(P_MEM, bot); dockW(P_STACK, bot);
+    dockW(P_INSTR, bot); dockW(P_MEM, bot); dockW(P_STACK, bot); dockW(P_PIPE, bot);
     dockW(P_REGS, rTop);
     dockW(P_SYMS, rBot); dockW(P_ENCODER, rBot); dockW(P_MAP, rBot); dockW(P_REF, rBot);
     ImGui::DockBuilderFinish(dock);
@@ -112,17 +113,51 @@ void MainView::mainMenu() {
         if (ImGui::MenuItem("Salir")) ctrl_.requestQuit();
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Editar")) {
+        if (ImGui::MenuItem("Deshacer", "Ctrl+Z")) vs_.editCmd = EditCmd::Undo;
+        if (ImGui::MenuItem("Rehacer", "Ctrl+Y")) vs_.editCmd = EditCmd::Redo;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Cortar", "Ctrl+X")) vs_.editCmd = EditCmd::Cut;
+        if (ImGui::MenuItem("Copiar", "Ctrl+C")) vs_.editCmd = EditCmd::Copy;
+        if (ImGui::MenuItem("Pegar", "Ctrl+V")) vs_.editCmd = EditCmd::Paste;
+        if (ImGui::MenuItem("Seleccionar todo", "Ctrl+A")) vs_.editCmd = EditCmd::SelectAll;
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Ejecutar")) {
         if (ImGui::MenuItem("Ensamblar", "F7")) ctrl_.assemble();
         if (ImGui::MenuItem(model_.running() ? "Pausar" : "Ejecutar", "F5")) ctrl_.toggleRun();
-        if (ImGui::MenuItem("Paso", "F10")) ctrl_.step();
-        if (ImGui::MenuItem("Paso atrás", "Alt+Izq", false, model_.canStepBack())) ctrl_.stepBack();
+        const bool cyc = model_.cpuConfig().kind != CpuKind::Single;
+        if (ImGui::MenuItem(cyc ? "Ciclo de reloj" : "Paso", "F10")) ctrl_.step();
+        if (ImGui::MenuItem(cyc ? "Ciclo atrás" : "Paso atrás", "Alt+Izq", false, model_.canStepBack())) ctrl_.stepBack();
         if (ImGui::MenuItem("Reiniciar", "Mayús+F5")) ctrl_.reset();
         ImGui::Separator();
         if (ImGui::MenuItem("Punto de parada en la línea actual", "F9")) ctrl_.toggleBreakpoint(vs_.editorCursorLine);
         if (ImGui::MenuItem("Quitar todos los puntos de parada")) ctrl_.clearBreakpoints();
         ImGui::Separator();
         bool f = ui.followExec; if (ImGui::MenuItem("Seguir la ejecución en el editor", nullptr, &f)) { Settings s = st; s.ui.followExec = f; ctrl_.updateSettings(s); }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Procesador")) {
+        const CpuConfig cfg = model_.cpuConfig();
+        ImGui::TextDisabled("Tipo de procesador a simular");
+        const char* desc[3] = {"1 ciclo por instrucción", "BI · LR · E · M · ER, un ciclo por etapa", "varias instrucciones a la vez"};
+        for (int i = 0; i < 3; i++) {
+            std::string lab = std::string(cpuKindName((CpuKind)i)) + (i == 0 ? "  (por defecto)" : "");
+            if (ImGui::MenuItem(lab.c_str(), nullptr, (int)cfg.kind == i) && (int)cfg.kind != i) ctrl_.setCpuKind((CpuKind)i);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", desc[i]);
+        }
+        if (cfg.kind == CpuKind::Pipelined) {
+            ImGui::Separator();
+            if (ImGui::BeginMenu("Número de etapas")) {
+                for (int n = PIPE_MIN_STAGES; n <= PIPE_MAX_STAGES; n++) {
+                    std::string lab = std::to_string(n) + " etapas" + (n == PIPE_DEFAULT_STAGES ? "  (BI, LR, E, M, ER)" : "");
+                    if (ImGui::MenuItem(lab.c_str(), nullptr, cfg.clampedStages() == n)) ctrl_.setPipelineStages(n);
+                }
+                ImGui::EndMenu();
+            }
+            bool f = cfg.forwarding; if (ImGui::MenuItem("Anticipación (forwarding)", nullptr, &f)) ctrl_.setForwarding(f);
+        }
+        ImGui::Separator(); ImGui::TextDisabled("Al cambiar de procesador se reinicia la simulación.");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Ver")) {
@@ -162,15 +197,35 @@ void MainView::toolbar() {
     ImGui::PushStyleColor(ImGuiCol_Button, model_.running() ? mixc(c.panel, c.warn, 0.5f) : mixc(c.panel, c.accent, 0.5f));
     if (ImGui::Button(model_.running() ? "Pausa  F5" : "Ejecutar F5")) ctrl_.toggleRun();
     ImGui::PopStyleColor(); ImGui::SameLine();
-    if (ImGui::Button("Paso F10")) ctrl_.step(); ImGui::SameLine();
+    const bool cyc = model_.cpuConfig().kind != CpuKind::Single;
+    if (ImGui::Button(cyc ? "Ciclo F10" : "Paso F10")) ctrl_.step(); ImGui::SameLine();
     ImGui::BeginDisabled(!model_.canStepBack()); if (ImGui::Button("Atrás")) ctrl_.stepBack(); ImGui::EndDisabled(); ImGui::SameLine();
     if (ImGui::Button("Reiniciar")) ctrl_.reset(); ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
+    {   // tipo de procesador (y nº de etapas si es segmentado)
+        const CpuConfig cfg = model_.cpuConfig(); std::string cur = cpuKindName(cfg.kind);
+        ImGui::SetNextItemWidth(ImGui::CalcTextSize("Multiciclo").x + 46 * ui.fontScale);
+        if (ImGui::BeginCombo("##cpukind", cur.c_str())) {
+            for (int i = 0; i < 3; i++) if (ImGui::Selectable(cpuKindName((CpuKind)i), (int)cfg.kind == i) && (int)cfg.kind != i) ctrl_.setCpuKind((CpuKind)i);
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tipo de procesador a simular (monociclo por defecto).\nAl cambiarlo se reinicia la simulación.");
+        if (cfg.kind == CpuKind::Pipelined) {
+            ImGui::SameLine(); ImGui::SetNextItemWidth(ImGui::CalcTextSize("10 etapas").x + 40 * ui.fontScale);
+            int n = cfg.clampedStages(); std::string sl = std::to_string(n) + " etapas";
+            if (ImGui::BeginCombo("##cpustages", sl.c_str())) {
+                for (int k = PIPE_MIN_STAGES; k <= PIPE_MAX_STAGES; k++) { std::string it = std::to_string(k) + " etapas" + (k == PIPE_DEFAULT_STAGES ? " (BI,LR,E,M,ER)" : ""); if (ImGui::Selectable(it.c_str(), k == n)) ctrl_.setPipelineStages(k); }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Número de etapas de la tubería");
+        }
+    }
+    ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     float sps = model_.settings().sim.stepsPerSec, lv = std::log10(sps);
     ImGui::SetNextItemWidth(160 * ui.fontScale);
     if (ImGui::SliderFloat("##speed", &lv, 0.0f, 5.0f, "")) ctrl_.setStepsPerSecond(std::pow(10.0f, lv));
     ImGui::SameLine();
-    if (sps >= 100000) ImGui::Text("máxima"); else ImGui::Text("%.0f inst/s", sps);
+    if (sps >= 100000) ImGui::Text("máxima"); else ImGui::Text(cyc ? "%.0f ciclos/s" : "%.0f inst/s", sps);
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
     const Status& s = model_.status();
     ImVec4 sc = s.kind == StatusKind::Error ? c.bad : s.kind == StatusKind::Ok ? c.good : s.kind == StatusKind::Warning ? c.warn : c.text;
@@ -200,6 +255,9 @@ void MainView::startFileDialog(bool save) {
     const Settings& st = model_.settings();
     std::string start = st.lastFile.empty() ? (save ? std::string("programa.s") : std::string()) : st.lastFile;
     vs_.fileError.clear();
+    // Android: «Abrir...» muestra el administrador de archivos del sistema. El archivo elegido llega después como un
+    // evento SDL_DROPFILE (la actividad Java lo copia a la carpeta de la app), así que aquí no hay nada más que hacer.
+    if (!save && platform::androidOpenFilePicker()) return;
     if (platform::nativeFileDialogAvailable()) {
         vs_.nativeBusy = true; vs_.nativeSave = save;
         vs_.nativeJob = std::async(std::launch::async, [save, start]() {
@@ -254,8 +312,11 @@ void MainView::frame(float dt) {
     drawBackground();
 
     ImGuiViewport* vp = ImGui::GetMainViewport(); float th = ImGui::GetFrameHeight() * 1.5f;
+    // Teclado en pantalla (Android): la disposición se encoge para que el editor quede por encima del teclado
+    vs_.kbInset = (float)platform::androidKeyboardInsetPx();
+    float usableH = std::max(vp->WorkSize.y - th - vs_.kbInset, 120.0f);
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + th));
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, vp->WorkSize.y - th));
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, usableH));
     ImGui::SetNextWindowViewport(vp->ID);
     ImGuiWindowFlags hf = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
@@ -268,5 +329,6 @@ void MainView::frame(float dt) {
     mainMenu(); toolbar(); handleInput();
     ViewContext ctx{model_, ctrl_, vs_};
     for (auto& p : panels_) p->draw(ctx);
+    vs_.editCmd = EditCmd::None;          // si el editor está oculto nadie la ha consumido: no debe ejecutarse más tarde
     fileDialogs(); drawBootOverlay();
 }

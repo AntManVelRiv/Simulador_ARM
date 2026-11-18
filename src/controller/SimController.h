@@ -39,6 +39,9 @@ public:
     // Configuración
     void updateSettings(const Settings& s) { m_.applySettings(s); }
     void setStepsPerSecond(float v);
+    void setCpuKind(arm::CpuKind k);               // monociclo / multiciclo / segmentado (reinicia la simulación)
+    void setPipelineStages(int n);                 // nº de etapas del segmentado (2..10)
+    void setForwarding(bool on);
     void setPanelVisible(PanelId id, bool v);
     void applyThemePreset(int index);
     void resetSettings();

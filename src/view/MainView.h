@@ -19,7 +19,7 @@ private:
     void startFileDialog(bool save);
     void finishFileChoice(bool save, const std::string& path);
 public:
-    bool wantsFastPoll() const { return vs_.nativeBusy; }   // mientras esperamos al diálogo nativo hay que sondear a menudo
+    bool wantsFastPoll() const { return vs_.nativeBusy || vs_.kbInset > 0; }   // esperando al diálogo nativo o con el teclado en pantalla (animación) hay que sondear a menudo
 private:
 
     SimModel& model_;

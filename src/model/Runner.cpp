@@ -79,8 +79,9 @@ RunResult runProgram(const Program& prog, const RunOptions& opt, std::istream& i
     auto flush = [&]() { if (m.output.size() > flushed) { out << m.output.substr(flushed); out.flush(); flushed = m.output.size(); } };
     std::istringstream sin(opt.stdinText);
 
+    CpuModel cpu(prog, opt.cpu); cpu.reset(m);
     while (true) {
-        if (m.halted) {
+        if (m.halted && (m.haltKind == "input" || !cpu.busy())) {
             flush();
             if (m.haltKind != "input") break;
             std::string line; std::istream& src = opt.useStdinText ? (std::istream&)sin : in;
@@ -92,7 +93,8 @@ RunResult runProgram(const Program& prog, const RunOptions& opt, std::istream& i
             }
             m.feedInput(line + "\n"); continue;
         }
-        auto rec = m.step();
+        auto cr = cpu.clock(m); auto& rec = cr.rec;
+        if (!cr.ok && !m.halted) break;
         if (opt.trace && rec) {
             diag << hx0x(rec->addr) << "  " << (rec->executed ? " " : "x") << " " << rec->ins.src;
             if (!rec->sym.empty() && rec->executed) diag << "    ; " << rec->sym << "  [" << rec->num << "]";
@@ -102,13 +104,18 @@ RunResult runProgram(const Program& prog, const RunOptions& opt, std::istream& i
     }
     flush();
 
-    res.output = m.output; res.steps = m.steps; res.r0 = m.r[0];
+    res.output = m.output; res.steps = m.steps; res.r0 = m.r[0]; res.cycles = cpu.stats().cycles;
     res.haltKind = m.haltKind; res.haltReason = m.haltReason;
     if (m.haltKind == "exit" && m.exitCode) res.r0 = m.exitCode;
     if (m.haltKind == "error" || m.haltKind == "limit") { if (res.error.empty()) res.error = m.haltReason; }
     else if (m.haltKind == "input" && res.error.empty()) res.error = m.haltReason;
     res.ok = res.error.empty();
 
+    if (opt.showStats) {
+        const CpuStats& st = cpu.stats();
+        diag << "\n[procesador: " << cpuConfigText(opt.cpu) << "]\n  ciclos       = " << st.cycles << "\n  instrucciones = " << st.retired << "\n  CPI          = " << (st.retired ? (double)st.cycles / (double)st.retired : 0.0) << "\n";
+        if (opt.cpu.kind == CpuKind::Pipelined) diag << "  paradas (riesgo de datos) = " << st.stallCycles << "\n  saltos que vacían la tubería = " << st.flushEvents << " (" << st.flushedInstrs << " instrucciones anuladas)\n  operandos anticipados = " << st.forwards << "\n";
+    }
     if (opt.showRegs) { diag << "\n[registros finales tras " << m.steps << " instrucciones]\n"; dumpRegs(m, diag); }
     if (opt.showReturn) {   // por la salida normal (no la de diagnostico) para poder capturarlo con $(...) o redirigirlo
         if (!res.output.empty() && res.output.back() != '\n') out << "\n";

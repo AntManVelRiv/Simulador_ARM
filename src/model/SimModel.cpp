@@ -29,12 +29,13 @@ bool SimModel::assemble() {
     dirty_ = false; trace_.clear(); last_.reset();
     bump();
     if (!prog_.ok) {
-        mach_.reset();
+        mach_.reset(); cpu_.reset();
         setStatus(std::to_string(prog_.errors.size()) + " error(es) de ensamblado", StatusKind::Error);
         return false;
     }
     mach_ = std::make_unique<Machine>(prog_);
     applyInitialState();
+    cpu_ = std::make_unique<CpuModel>(prog_, settings_.sim.cpu); cpu_->reset(*mach_);
     setStatus("Ensamblado: " + std::to_string(prog_.nInstr) + " instrucciones", StatusKind::Ok);
     return true;
 }
@@ -61,32 +62,69 @@ void SimModel::reset() {
     if (!mach_) return;
     mach_->reset();
     applyInitialState();
+    if (cpu_) cpu_->reset(*mach_);
     trace_.clear(); last_.reset(); bump();
     if (mach_->halted && mach_->haltKind == "error") setStatus(mach_->haltReason, StatusKind::Error);
     else setStatus("Reiniciado", StatusKind::Normal);
 }
 
+bool SimModel::finished() const {
+    return mach_ && mach_->halted && mach_->haltKind != "input" && !(cpu_ && cpu_->busy());
+}
+
+static std::string cycleStatus(const CpuModel& cpu) {
+    const CpuStats& st = cpu.stats();
+    if (cpu.config().kind == CpuKind::Single) return std::to_string(st.executed) + " instrucciones ejecutadas";
+    char b[160]; std::snprintf(b, sizeof b, "ciclo %ld  ·  %ld instrucciones  ·  CPI %.2f", st.cycles, st.retired, st.cpi());
+    return b;
+}
+
 bool SimModel::step() {
     if (dirty_ || !mach_) { if (!assemble()) return false; }
-    if (mach_->halted) { setStatus(mach_->haltReason, mach_->haltKind == "error" ? StatusKind::Error : StatusKind::Warning); running_ = false; return false; }
-    auto rec = mach_->step();
-    if (!rec) { setStatus(mach_->haltReason, StatusKind::Error); running_ = false; return false; }
-    last_ = rec; trace_.push_back(*rec);
-    if (trace_.size() > 4000) trace_.erase(trace_.begin(), trace_.begin() + 500);
-    stepSerial_++; bump();
-    if (mach_->halted) { setStatus(mach_->haltReason, mach_->haltKind == "error" ? StatusKind::Error : StatusKind::Warning); running_ = false; }
-    else setStatus(std::to_string(mach_->steps) + " instrucciones ejecutadas", StatusKind::Normal);
+    if (finished()) { setStatus(mach_->haltReason, mach_->haltKind == "error" ? StatusKind::Error : StatusKind::Warning); running_ = false; return false; }
+    auto cr = cpu_->clock(*mach_);
+    if (!cr.ok) { setStatus(mach_->haltReason, StatusKind::Error); running_ = false; return false; }
+    stepSerial_++;
+    if (cr.rec) {
+        last_ = cr.rec; trace_.push_back(*cr.rec); execSerial_++;
+        if (trace_.size() > 4000) trace_.erase(trace_.begin(), trace_.begin() + 500);
+    }
+    bump();
+    if (finished()) { setStatus(mach_->haltReason + "  (" + cycleStatus(*cpu_) + ")", mach_->haltKind == "error" ? StatusKind::Error : StatusKind::Warning); running_ = false; }
+    else if (mach_->halted && mach_->haltKind != "input") setStatus("Vaciando la tubería...  " + cycleStatus(*cpu_), StatusKind::Normal);
+    else setStatus(cycleStatus(*cpu_), StatusKind::Normal);
     return true;
 }
 
 bool SimModel::stepBack() {
     running_ = false;
-    if (!mach_ || !mach_->back()) { setStatus("No hay más pasos que deshacer", StatusKind::Warning); return false; }
-    if (!trace_.empty()) trace_.pop_back();
-    if (trace_.empty()) last_.reset(); else last_ = trace_.back();
-    stepSerial_++; bump();
-    setStatus(std::to_string(mach_->steps) + " instrucciones ejecutadas", StatusKind::Normal);
+    auto br = cpu_ ? cpu_->back(*mach_) : CpuModel::BackResult();
+    if (!mach_ || !br.ok) { setStatus("No hay más pasos que deshacer", StatusKind::Warning); return false; }
+    if (br.undidInstruction) { if (!trace_.empty()) trace_.pop_back(); if (trace_.empty()) last_.reset(); else last_ = trace_.back(); }
+    stepSerial_++; if (br.undidInstruction) execSerial_++; bump();
+    setStatus(cycleStatus(*cpu_), StatusKind::Normal);
     return true;
+}
+
+bool SimModel::breakpointBeforeNext() const {
+    if (!mach_ || !cpu_ || cpu_->config().kind == CpuKind::Pipelined) return false;
+    if (!cpu_->atInstructionBoundary()) return false;
+    return hasBreakpointAt(mach_->pc);
+}
+bool SimModel::breakpointAfterClock() const {
+    if (!cpu_ || cpu_->config().kind != CpuKind::Pipelined) return false;
+    const Instruction* f = cpu_->fetchedLastCycle();
+    return f && std::find(bps_.begin(), bps_.end(), f->line) != bps_.end();
+}
+
+void SimModel::applySettings(const Settings& s) {
+    bool cpuChanged = s.sim.cpu != settings_.sim.cpu;
+    settings_ = s; settings_.ui.lowPower = resolveLowPower(settings_.ui.powerMode); settingsRev_++;
+    if (cpuChanged && mach_) {
+        cpu_ = std::make_unique<CpuModel>(prog_, settings_.sim.cpu);
+        reset();
+        setStatus("Procesador: " + cpuConfigText(settings_.sim.cpu) + " (simulación reiniciada)", StatusKind::Ok);
+    }
 }
 
 void SimModel::toggleBreakpointLine(int line) {
@@ -99,17 +137,17 @@ void SimModel::clearBreakpoints() { bps_.clear(); bump(); }
 void SimModel::setRegister(int r, uint32_t v) {
     if (!mach_) return;
     if (r == 15) mach_->pc = v; else mach_->r[r] = v;
-    mach_->clearHistory(); bump();
+    mach_->clearHistory(); if (cpu_) { cpu_->clearHistory(); if (r == 15) cpu_->resync(*mach_); } bump();
 }
 void SimModel::setFlag(char which, bool v) {
     if (!mach_) return;
     switch (which) { case 'N': mach_->f.N = v; break; case 'Z': mach_->f.Z = v; break; case 'C': mach_->f.C = v; break; case 'V': mach_->f.V = v; break; }
-    mach_->clearHistory(); bump();
+    mach_->clearHistory(); if (cpu_) cpu_->clearHistory(); bump();
 }
 void SimModel::writeMemory(uint32_t addr, uint32_t value, int size) {
     if (!mach_) return;
     for (int i = 0; i < size; i++) { mach_->mem[addr + i] = (uint8_t)(value >> (8 * i)); mach_->touched[addr + i] = true; }
-    mach_->clearHistory(); bump();
+    mach_->clearHistory(); if (cpu_) cpu_->clearHistory(); bump();
 }
 
 void SimModel::provideInput(const std::string& text) {

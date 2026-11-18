@@ -2,6 +2,7 @@
 // No depende de ninguna biblioteca gráfica: los colores son estructuras simples.
 #pragma once
 #include "Arm.h"
+#include "Cpu.h"
 #include <string>
 #include <vector>
 
@@ -13,7 +14,7 @@ const std::vector<ThemePreset>& themePresets();
 
 // Identificadores de los paneles (vistas) de la aplicación
 enum PanelId { P_EDITOR, P_LISTING, P_REGS, P_INSTR, P_CPU, P_MEM, P_STACK, P_TRACE, P_OUTPUT, P_SYMS,
-               P_ENCODER, P_MAP, P_REF, P_SETTINGS, P_ABOUT, P_COUNT };
+               P_ENCODER, P_MAP, P_REF, P_SETTINGS, P_ABOUT, P_PIPE, P_COUNT };
 const char* panelTitle(PanelId id);
 
 // Bloque de memoria que se precarga al reiniciar la máquina
@@ -25,7 +26,8 @@ struct SimConfig {
     uint32_t initRegs[16] = {0};
     bool initRegSet[16] = {false};
     std::vector<Preload> preloads;
-    float stepsPerSec = 30.0f;           // velocidad de ejecución continua (>=100000 = máxima)
+    float stepsPerSec = 30.0f;           // velocidad de ejecución continua (>=100000 = máxima); en multiciclo/segmentado son ciclos/s
+    arm::CpuConfig cpu;                  // tipo de procesador a simular: monociclo (por defecto), multiciclo o segmentado (k etapas)
 };
 
 // Preferencias de aspecto e interfaz

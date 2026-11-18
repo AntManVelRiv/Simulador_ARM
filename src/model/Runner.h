@@ -5,6 +5,7 @@
 //     que es justo lo que ocurre cuando un main escrito en C invoca a una función escrita en ensamblador.
 #pragma once
 #include "Arm.h"
+#include "Cpu.h"
 #include <cstdint>
 #include <iosfwd>
 #include <string>
@@ -36,6 +37,8 @@ struct RunOptions {
     bool trace = false;                // imprime cada instrucción ejecutada
     bool showRegs = false;             // vuelca registros y flags al terminar
     bool showReturn = false;           // imprime R0 al terminar (valor de retorno)
+    CpuConfig cpu;                     // procesador a simular (monociclo por defecto)
+    bool showStats = false;            // imprime ciclos, instrucciones y CPI al terminar
     std::vector<std::pair<uint32_t,uint32_t>> dumps;   // (dirección, nº de bytes) a volcar al terminar
     std::string stdinText;             // texto con el que se alimenta la consola (si useStdinText)
     bool useStdinText = false;         // false: leer de std::cin cuando el programa pida entrada
@@ -49,6 +52,7 @@ struct RunResult {
     std::string haltReason;
     uint32_t r0 = 0;                   // valor de retorno / de salida
     long steps = 0;
+    long cycles = 0;                   // ciclos de reloj del procesador simulado
     std::string output;
 };
 

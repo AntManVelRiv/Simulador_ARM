@@ -8,7 +8,11 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include <SDL.h>
-#include <SDL_opengl.h>
+#if defined(__ANDROID__)
+  #include <SDL_opengles2.h>      // glViewport, glClear... (OpenGL ES 3.0 en Android)
+#else
+  #include <SDL_opengl.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -28,7 +32,14 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') openPath = argv[i];
     }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
-#if defined(__APPLE__)
+#if defined(__ANDROID__)
+    const char* glsl = "#version 300 es";
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    // Los programas se abren/guardan en la carpeta de la aplicación (visible desde el administrador de archivos si es posible)
+    { const char* ext = SDL_AndroidGetExternalStoragePath(); const char* in = SDL_AndroidGetInternalStoragePath(); const char* home = ext ? ext : in; if (home) setenv("HOME", home, 1); }
+#elif defined(__APPLE__)
     const char* glsl = "#version 150";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -40,8 +51,13 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+#if defined(__ANDROID__)
+    SDL_WindowFlags wf = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* window = SDL_CreateWindow("ARM SIM", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0, wf);
+#else
     SDL_WindowFlags wf = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_Window* window = SDL_CreateWindow("ARM SIM — Simulador ARMv4", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1500, 900, wf);
+#endif
     if (!window) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return 1; }
     SDL_GLContext gl = SDL_GL_CreateContext(window);
     if (!gl) { std::fprintf(stderr, "SDL_GL_CreateContext: %s\n", SDL_GetError()); return 1; }
@@ -60,7 +76,15 @@ int main(int argc, char** argv) {
 
     // ---------------- MVC: modelo, controlador y vista ----------------
     SimModel model; SimController controller(model);
-    { Settings s; SettingsStore::load(s, prefDir + "settings.ini"); controller.updateSettings(s); }
+    { Settings s; bool hadSettings = SettingsStore::load(s, prefDir + "settings.ini");
+#if defined(__ANDROID__)
+      if (!hadSettings) {   // primer arranque en el móvil/tablet: tamaño del texto según la densidad de pantalla
+          float ddpi = 0; s.ui.fontScale = (SDL_GetDisplayDPI(0, &ddpi, nullptr, nullptr) == 0 && ddpi > 0) ? std::max(1.4f, std::min(3.0f, ddpi / 210.0f)) : 2.0f;
+      }
+#else
+      (void)hadSettings;
+#endif
+      controller.updateSettings(s); }
     { Settings s = model.settings(); controller.updateSettings(s); }   // recalcula el modo de ahorro de energía (--low-power / Raspberry Pi)
     if (openPath.empty() || !controller.openFile(openPath)) controller.loadExample(0);
     applyTheme(model.settings().ui);
@@ -77,6 +101,7 @@ int main(int argc, char** argv) {
             gotEvent = true;
             ImGui_ImplSDL2_ProcessEvent(&e);
             if (e.type == SDL_QUIT || (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE && e.window.windowID == SDL_GetWindowID(window))) done = true;
+            if (e.type == SDL_APP_WILLENTERBACKGROUND || e.type == SDL_APP_TERMINATING) SettingsStore::save(model.settings(), prefDir + "settings.ini");   // Android puede cerrar la app sin avisar
             if (e.type == SDL_DROPFILE) { if (e.drop.file) { controller.openFile(e.drop.file); SDL_free(e.drop.file); } }   // arrastrar un .s sobre la ventana
         };
         SDL_Event e;

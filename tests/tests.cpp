@@ -3,6 +3,8 @@
 #include "model/Examples.h"
 #include "controller/SimController.h"
 #include "model/Runner.h"
+#include "model/Cpu.h"
+#include <array>
 #include <sstream>
 #include <iostream>
 #include <functional>
@@ -15,6 +17,22 @@ static int failures = 0, total = 0;
 static Machine runSrc(const std::string& src, Program& holder) {
     holder = assemble(src); Machine m(holder); m.run(200000); return m;
 }
+
+
+// Ejecuta un programa con un modelo de procesador concreto hasta que termine (alimentando las entradas con "5")
+struct CpuRun { Machine m; CpuStats st; std::string kind; bool ok = true; };
+static CpuRun runCpu(const Program& p, const CpuConfig& cfg, long maxCycles = 3000000) {
+    Machine m(p); m.keepHistory = false; CpuModel cpu(p, cfg); cpu.reset(m);
+    long n = 0;
+    while (n++ < maxCycles) {
+        if (m.halted && m.haltKind == "input") { m.feedInput("5\n"); continue; }
+        if (m.halted && !cpu.busy()) break;
+        if (!cpu.clock(m).ok && !m.halted) break;
+    }
+    CpuRun r{m, cpu.stats(), m.haltKind, !(n >= maxCycles)}; return r;
+}
+static CpuRun runCpuSrc(const std::string& src, const CpuConfig& cfg) { Program p = assemble(src); CpuRun r = runCpu(p, cfg); return r; }
+static CpuConfig pipeCfg(int k, bool fwd = true) { CpuConfig c; c.kind = CpuKind::Pipelined; c.stages = k; c.forwarding = fwd; return c; }
 
 int main() {
     // --- Codificación: coincide con el ejemplo resuelto del tema (PDF) ---
@@ -212,6 +230,89 @@ int main() {
       Program p = assemble(".data\nf: .asciz \"%d\"\na: .word 0\nb: .word 0\n.text\nmain: ldr r0,=f\nldr r1,=a\nbl scanf\nldr r0,=f\nldr r1,=b\nbl scanf\nmov r7,r0\nbx lr\n");
       Machine m(p); m.pc = p.symbols.at("main"); m.r[14] = 0; m.feedInput("3 4"); m.run(1000);
       CHECK(m.readWord(p.symbols.at("a")) == 3); CHECK(m.readWord(p.symbols.at("b")) == 4); CHECK(m.r[7] == 1); }
+
+    // ======================= Modelos de procesador: monociclo / multiciclo / segmentado =======================
+    { CpuConfig d; CHECK(d.kind == CpuKind::Single); CHECK(d.stages == 5); CHECK(Settings().sim.cpu.kind == CpuKind::Single); }   // por defecto: monociclo; segmentado: 5 etapas
+    // mapa de etapas
+    { StageMap m5 = StageMap::make(5); CHECK(m5.k == 5 && m5.names.size() == 5 && m5.names[0] == "BI" && m5.names[4] == "ER");
+      for (int k = PIPE_MIN_STAGES; k <= PIPE_MAX_STAGES; k++) {
+          StageMap m = StageMap::make(k); CHECK(m.k == k && (int)m.names.size() == k);
+          for (int ls = 0; ls < LS_COUNT; ls++) CHECK(m.first[ls] >= 0 && m.last[ls] < k && m.first[ls] <= m.last[ls]);
+          CHECK(m.first[LS_F] == 0 && m.last[LS_W] == k - 1);
+          for (int ls = 1; ls < LS_COUNT; ls++) CHECK(m.first[ls] == m.last[ls - 1] || m.first[ls] == m.last[ls - 1] + 1);
+      }
+      CHECK(StageMap::make(2).names[1] == "LR+E+M+ER"); CHECK(StageMap::make(6).names[2] == "E1" && StageMap::make(6).names[3] == "E2"); }
+    // monociclo: 1 ciclo por instrucción
+    { auto r = runCpuSrc("MOV R1,#1\nADD R2,R1,R1\nSWI 0x11\n", CpuConfig()); CHECK(r.st.cycles == 3 && r.st.retired == 3 && r.m.r[2] == 2); }
+    // multiciclo: BI+LR+E (+M) (+ER) según la instrucción
+    { CpuConfig c; c.kind = CpuKind::Multi;
+      CHECK(runCpuSrc("MOV R1,#1\nSWI 0x11\n", c).st.cycles == 4 + 3);                                     // DP: 4 · SWI: 3
+      CHECK(runCpuSrc(".data\nv: .word 5\n.text\nLDR R0,=v\nLDR R1,[R0]\nSTR R1,[R0]\nB f\nf SWI 0x11\n", c).st.cycles == 5 + 5 + 4 + 3 + 3);   // LDR 5, STR 4, B 3
+      CHECK(runCpuSrc("CMP R1,#1\nADDEQ R2,R2,#1\nSWI 0x11\n", c).st.cycles == 3 + 3 + 3);                  // CMP 3; ADDEQ no cumplida: 3
+      CHECK(runCpuSrc("MOV R0,#1\nMOV R1,#2\nPUSH {R0,R1}\nSWI 0x11\n", c).st.cycles == 4 + 4 + (3 + 2 + 1) + 3); }   // PUSH de 2 registros: 2 ciclos de M
+    // segmentado de 5 etapas
+    { auto r = runCpuSrc("MOV R1,#1\nMOV R2,#2\nMOV R3,#3\nMOV R4,#4\nSWI 0x11\n", pipeCfg(5));
+      CHECK(r.st.retired == 5 && r.st.cycles == 5 + 4 && r.st.stallCycles == 0 && r.st.flushEvents == 0); }           // llenado: N + 4
+    { auto r = runCpuSrc("MOV R1,#1\nADD R1,R1,#1\nADD R1,R1,#1\nSWI 0x11\n", pipeCfg(5));
+      CHECK(r.m.r[1] == 3 && r.st.cycles == 4 + 4 && r.st.stallCycles == 0 && r.st.forwards == 2); }                  // con anticipación no hay paradas
+    { auto r = runCpuSrc(".data\nv: .word 5\n.text\nLDR R0,=v\nLDR R1,[R0]\nADD R2,R1,R1\nSWI 0x11\n", pipeCfg(5));
+      CHECK(r.m.r[2] == 10 && r.st.stallCycles == 2 && r.st.cycles == 4 + 4 + 2); }                                    // dos LDR con uso inmediato: 1 parada cada uno
+    { auto r = runCpuSrc("MOV R1,#1\nADD R2,R1,R1\nSWI 0x11\n", pipeCfg(5, false));
+      CHECK(r.m.r[2] == 2 && r.st.stallCycles == 2 && r.st.cycles == 3 + 4 + 2); }                                     // sin anticipación: 2 paradas
+    { auto r = runCpuSrc("B f\nMOV R1,#1\nMOV R2,#2\nf SWI 0x11\n", pipeCfg(5));
+      CHECK(r.m.r[1] == 0 && r.m.r[2] == 0 && r.st.retired == 2 && r.st.flushEvents == 1 && r.st.flushedInstrs == 2 && r.st.cycles == 8); }   // salto tomado: 2 ciclos perdidos
+    { auto r = runCpuSrc("MOV R1,#1\nCMP R1,#2\nBEQ f\nMOV R2,#7\nf SWI 0x11\n", pipeCfg(5));
+      CHECK(r.m.r[2] == 7 && r.st.flushEvents == 0 && r.st.cycles == 5 + 4); }                                         // salto no tomado: sin penalización
+    { auto r = runCpuSrc("MOV R0,#3\nBL f\nSWI 0x11\nf ADD R0,R0,#1\nMOV PC,LR\n", pipeCfg(5));
+      CHECK(r.m.r[0] == 4 && r.st.flushEvents == 2); }                                                                 // BL y retorno (MOV PC,LR)
+    // mas etapas => mas penalizacion por salto; menos etapas => menos
+    { std::string loop = "MOV R0,#0\nL ADD R0,R0,#1\nCMP R0,#20\nBLT L\nSWI 0x11\n";
+      long c2 = runCpuSrc(loop, pipeCfg(2)).st.cycles, c5 = runCpuSrc(loop, pipeCfg(5)).st.cycles, c8 = runCpuSrc(loop, pipeCfg(8)).st.cycles;
+      CHECK(runCpuSrc(loop, pipeCfg(5)).m.r[0] == 20); CHECK(c2 < c5 && c5 < c8); }
+    // EQUIVALENCIA: todos los ejemplos dan el mismo resultado con cualquier procesador, etapas y anticipación
+    for (const auto& ex : examples()) {
+        Program p = assemble(ex.code); if (!p.ok) continue;
+        Machine ref(p); ref.keepHistory = false; { long n = 0; while (n++ < 3000000) { if (ref.halted && ref.haltKind == "input") { ref.feedInput("5\n"); continue; } if (ref.halted) break; ref.step(); } }
+        std::vector<CpuConfig> cfgs; { CpuConfig a; cfgs.push_back(a); CpuConfig b; b.kind = CpuKind::Multi; cfgs.push_back(b); }
+        for (int k = PIPE_MIN_STAGES; k <= PIPE_MAX_STAGES; k++) { cfgs.push_back(pipeCfg(k, true)); if (k == 3 || k == 5 || k == 7) cfgs.push_back(pipeCfg(k, false)); }
+        for (const auto& c : cfgs) {
+            CpuRun r = runCpu(p, c);
+            bool same = r.ok && r.m.haltKind == ref.haltKind && r.m.output == ref.output && r.m.pc == ref.pc && r.m.f.N == ref.f.N && r.m.f.Z == ref.f.Z && r.m.f.C == ref.f.C && r.m.f.V == ref.f.V;
+            for (int i = 0; i < 15 && same; i++) same = r.m.r[i] == ref.r[i];
+            CHECK(same); if (!same) std::cerr << "  ejemplo '" << ex.name << "' con " << cpuConfigText(c) << "\n";
+            { bool cnt = r.st.retired == r.st.executed && r.st.executed == ref.steps; CHECK(cnt); if (!cnt) std::cerr << "  recuento en '" << ex.name << "' con " << cpuConfigText(c) << ": retired=" << r.st.retired << " executed=" << r.st.executed << " ref=" << ref.steps << "\n"; }      // mismas instrucciones, todas terminadas
+            if (c.kind == CpuKind::Pipelined) CHECK(r.st.cycles >= r.st.retired);
+        }
+    }
+    // paso atrás por ciclos: deshacer N ciclos devuelve exactamente al estado anterior
+    for (int k : {2, 5, 7}) { for (auto kind : {CpuKind::Multi, CpuKind::Pipelined}) {
+        Program p = assemble(".data\nv: .word 5\n.text\nMOV R0,#0\nL ADD R0,R0,#1\nLDR R1,=v\nADD R2,R1,R0\nCMP R0,#6\nBLT L\nSWI 0x11\n");
+        Machine m(p); CpuConfig c = pipeCfg(k); c.kind = kind; CpuModel cpu(p, c); cpu.reset(m);
+        std::vector<std::array<uint32_t, 17>> snaps; std::vector<long> cyc;
+        auto snap = [&]() { std::array<uint32_t, 17> a; for (int i = 0; i < 15; i++) a[i] = m.r[i]; a[15] = m.pc; a[16] = (m.f.N << 3) | (m.f.Z << 2) | (m.f.C << 1) | (int)m.f.V; return a; };
+        snaps.push_back(snap()); cyc.push_back(cpu.stats().cycles);
+        for (int i = 0; i < 60 && !(m.halted && !cpu.busy()); i++) { CHECK(cpu.clock(m).ok); snaps.push_back(snap()); cyc.push_back(cpu.stats().cycles); }
+        bool allOk = true; for (int i = (int)snaps.size() - 2; i >= 0; i--) { auto br = cpu.back(m); allOk = allOk && br.ok && snap() == snaps[i] && cpu.stats().cycles == cyc[i]; }
+        CHECK(allOk); CHECK(!cpu.canBack() || cpu.stats().cycles == 0);
+    } }
+    // a traves de SimModel/SimController: cambio de procesador, ciclos, paso atras y persistencia
+    {   SimModel model; SimController ctl(model);
+        ctl.editorChanged("MOV R1,#1\nADD R2,R1,R1\nSWI 0x11\n"); ctl.assemble();
+        CHECK(model.cpuConfig().kind == CpuKind::Single); ctl.step(); CHECK(model.cpu()->stats().cycles == 1);
+        ctl.setCpuKind(CpuKind::Pipelined); CHECK(model.cpuConfig().kind == CpuKind::Pipelined && model.cpuConfig().stages == 5); CHECK(model.cpu()->stats().cycles == 0);   // reinicia
+        ctl.step(); ctl.step(); CHECK(model.cpu()->stats().cycles == 2 && model.machine()->r[1] == 0);   // aún no ha llegado a E
+        ctl.step(); CHECK(model.machine()->r[1] == 1);                                                     // MOV en E: aplica su resultado
+        ctl.stepBack(); CHECK(model.machine()->r[1] == 0 && model.cpu()->stats().cycles == 2);
+        for (int i = 0; i < 20 && !model.finished(); i++) ctl.step(); CHECK(model.finished() && model.machine()->r[2] == 2 && model.cpu()->stats().cycles == 3 + 4);
+        ctl.setPipelineStages(7); CHECK(model.cpu()->stageMap().k == 7); ctl.setPipelineStages(99); CHECK(model.cpuConfig().stages == PIPE_MAX_STAGES);
+        ctl.setForwarding(false); CHECK(!model.cpuConfig().forwarding);
+        Settings s = model.settings(); std::string f = (std::filesystem::temp_directory_path() / "armsim_cpu_test.ini").string();
+        SettingsStore::save(s, f); Settings l; SettingsStore::load(l, f); CHECK(l.sim.cpu == s.sim.cpu && l.sim.cpu.kind == CpuKind::Pipelined && l.sim.cpu.stages == PIPE_MAX_STAGES && !l.sim.cpu.forwarding);
+        // punto de parada en segmentado: se detiene al captar la instrucción
+        ctl.setCpuKind(CpuKind::Pipelined); ctl.setForwarding(true); ctl.setPipelineStages(5);
+        ctl.editorChanged("MOV R1,#1\nMOV R2,#2\nMOV R3,#3\nSWI 0x11\n"); ctl.assemble(); ctl.toggleBreakpoint(3);
+        ctl.toggleRun(); for (int i = 0; i < 10 && model.running(); i++) ctl.tick(1.0); CHECK(!model.running() && model.cpu()->stats().cycles == 3);
+    }
     std::cout << (total - failures) << "/" << total << " comprobaciones correctas\n";
     return failures ? 1 : 0;
 }

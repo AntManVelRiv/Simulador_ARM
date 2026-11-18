@@ -11,8 +11,13 @@ public:
 protected:
     void content(ViewContext& c) override;
 private:
+    void editToolbar(ViewContext& c);                 // botones Copiar / Cortar / Pegar... (pantalla táctil)
+    void applyEditCommand(EditCmd cmd);
+    void requestSoftKeyboard();                        // le pide a ImGui/SDL que muestre el teclado en pantalla
     TextEditor ed_;
     uint64_t seenSettings_ = ~0ull, seenState_ = ~0ull;
+    bool kbWanted_ = false;                            // el usuario tocó el editor: hay que mostrar el teclado en pantalla
+    float prevKbInset_ = 0;
 };
 
 class ListingPanel : public Panel { public: ListingPanel() : Panel(P_LISTING) {} protected: void content(ViewContext&) override; };
@@ -36,6 +41,11 @@ class TracePanel : public Panel { public: TracePanel() : Panel(P_TRACE) {} prote
 class OutputPanel : public Panel { public: OutputPanel() : Panel(P_OUTPUT) {} protected: void content(ViewContext&) override; };
 class EncoderPanel : public Panel { public: EncoderPanel() : Panel(P_ENCODER) {} protected: void content(ViewContext&) override; };
 class ReferencePanel : public Panel { public: ReferencePanel() : Panel(P_REF) {} protected: void content(ViewContext&) override; };
+class PipelinePanel : public Panel {
+public: PipelinePanel() : Panel(P_PIPE) {}
+protected: void content(ViewContext&) override;
+private: long seenCycles_ = -1;
+};
 class AboutPanel : public Panel { public: AboutPanel() : Panel(P_ABOUT) {} protected: void content(ViewContext&) override; };
 
 class MemoryMapPanel : public Panel { public: MemoryMapPanel() : Panel(P_MAP) {} protected: void content(ViewContext&) override; };
@@ -43,3 +53,6 @@ class SettingsPanel : public Panel { public: SettingsPanel() : Panel(P_SETTINGS)
 
 // utilidad compartida: fila de campos de bits de una instrucción
 void drawFieldRow(const ViewContext& c, const std::vector<arm::Field>& fields, float width);
+
+// selector del tipo de procesador (monociclo / multiciclo / segmentado, nº de etapas y anticipación): se usa en el camino de datos
+void drawCpuSelector(ViewContext& c);

@@ -5,10 +5,14 @@
 #include "controller/SimController.h"
 #include "FileBrowser.h"
 #include "platform/FileDialog.h"
+#include "platform/AndroidBridge.h"
 #include <future>
 #include <map>
 #include <cstring>
 #include <string>
+
+// Órdenes de edición que se piden desde el menú «Editar» o la barra táctil y que ejecuta el panel del editor
+enum class EditCmd { None, Undo, Redo, Cut, Copy, Paste, SelectAll };
 
 struct ViewState {
     // animaciones
@@ -16,7 +20,7 @@ struct ViewState {
     float regFlash[16] = {0};
     std::map<uint32_t, float> memFlash;
     float stageT = 1e9f;                 // tiempo transcurrido desde el último paso (camino de datos)
-    uint64_t seenStepSerial = 0, seenExtRev = ~0ull;
+    uint64_t seenStepSerial = 0, seenExecSerial = 0, seenExtRev = ~0ull;
     float fps = 60;
     bool stepped = false;                // true durante el fotograma en que se ejecutó una instrucción
     // navegación y selección
@@ -34,6 +38,10 @@ struct ViewState {
     bool nativeBusy = false, nativeSave = false;
     std::string fileError;               // último error al abrir/guardar, mostrado dentro del explorador
     char encBuf[128] = "ADD R1, R2, R3";
+    // edición con teclado en pantalla (Android)
+    EditCmd editCmd = EditCmd::None;     // orden pendiente para el editor
+    bool refocusEditor = false;          // devolver el foco al editor tras pulsar un botón (para no perder el teclado)
+    float kbInset = 0;                   // píxeles que tapa el teclado en pantalla (0 = oculto)
 
     // Actualiza animaciones a partir de lo que ha cambiado en el modelo
     void sync(const SimModel& m, float dt) {
@@ -42,10 +50,14 @@ struct ViewState {
             seenStepSerial = m.stepSerial(); stepped = true;
             if (m.settings().ui.lowPower) { stageT = 1e9f; selInstrAddr = -1; }   // ahorro de energía: sin destellos ni animaciones
             else if (const arm::StepRecord* r = m.lastStep()) {
-                for (auto& rc : r->regs) regFlash[rc.r] = 1.0f;
-                for (auto& mw : r->mem) memFlash[mw.addr & ~3u] = 1.0f;
-                stageT = 0; selInstrAddr = -1;
+                if (m.execSerial() != seenExecSerial) {   // solo destellan los registros/memoria cuando una instrucción se ejecuta (no en cada ciclo)
+                    for (auto& rc : r->regs) regFlash[rc.r] = 1.0f;
+                    for (auto& mw : r->mem) memFlash[mw.addr & ~3u] = 1.0f;
+                    selInstrAddr = -1;
+                }
+                stageT = 0;
             } else stageT = 1e9f;
+            seenExecSerial = m.execSerial();
         }
         for (int i = 0; i < 16; i++) regFlash[i] = regFlash[i] > 0 ? std::max(0.0f, regFlash[i] - dt * 1.4f) : 0;
         for (auto it = memFlash.begin(); it != memFlash.end();) { it->second -= dt * 1.2f; if (it->second <= 0) it = memFlash.erase(it); else ++it; }

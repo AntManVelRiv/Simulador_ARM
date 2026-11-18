@@ -17,7 +17,7 @@ void SimController::loadExample(size_t i) {
 void SimController::toggleRun() {
     if (m_.running()) { m_.setRunning(false); m_.setStatus("En pausa", StatusKind::Warning); return; }
     if (m_.isDirty() || !m_.machine()) { if (!m_.assemble()) return; }
-    if (m_.machine()->halted) m_.reset();
+    if (m_.finished()) m_.reset();
     m_.setRunning(true); accum_ = 0; justResumed_ = true;
     m_.setStatus("Ejecutando...", StatusKind::Ok);
 }
@@ -30,7 +30,7 @@ void SimController::tick(double dt) {
     n = std::min(n, 200000);
     for (int i = 0; i < n && m_.running(); i++) {
         // punto de parada: se comprueba antes de ejecutar (salvo en la primera instrucción tras reanudar)
-        if (!justResumed_ && m_.hasBreakpointAt(m_.machine()->pc)) {
+        if (!justResumed_ && m_.breakpointBeforeNext()) {
             m_.setRunning(false);
             auto it = m_.program().byAddr.find(m_.machine()->pc);
             m_.setStatus("Punto de parada en la línea " + std::to_string(it->second.line), StatusKind::Warning);
@@ -38,6 +38,11 @@ void SimController::tick(double dt) {
         }
         justResumed_ = false;
         if (!m_.step()) return;
+        if (m_.breakpointAfterClock()) {   // segmentado: se detiene cuando la instrucción con punto de parada entra en la tubería (BI)
+            m_.setRunning(false);
+            m_.setStatus("Punto de parada en la línea " + std::to_string(m_.cpu()->fetchedLastCycle()->line) + " (instrucción captada)", StatusKind::Warning);
+            return;
+        }
     }
 }
 
@@ -58,3 +63,7 @@ void SimController::applyThemePreset(int i) {
     Settings s = m_.settings(); s.ui.theme = i; s.ui.col = P[i].palette; m_.applySettings(s);
 }
 void SimController::resetSettings() { Settings s; s.lastFile = m_.settings().lastFile; m_.applySettings(s); }
+
+void SimController::setCpuKind(arm::CpuKind k) { Settings s = m_.settings(); s.sim.cpu.kind = k; m_.applySettings(s); }
+void SimController::setPipelineStages(int n) { Settings s = m_.settings(); s.sim.cpu.stages = std::max(arm::PIPE_MIN_STAGES, std::min(arm::PIPE_MAX_STAGES, n)); m_.applySettings(s); }
+void SimController::setForwarding(bool on) { Settings s = m_.settings(); s.sim.cpu.forwarding = on; m_.applySettings(s); }

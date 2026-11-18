@@ -55,6 +55,7 @@ endif()
 # ---------------------------------- Modelo -----------------------------------
 add_library(armsim_model STATIC
   src/model/Arm.cpp
+  src/model/Cpu.cpp
   src/model/Runner.cpp
   src/model/Settings.cpp
   src/model/Examples.cpp
@@ -90,9 +91,11 @@ add_library(armsim_view STATIC
   src/view/Theme.cpp
   src/view/Panel.cpp
   src/view/FileBrowser.cpp
+  src/platform/AndroidBridge.cpp
   src/view/MainView.cpp
   src/view/FontData.cpp
   src/view/panels/CodePanels.cpp
+  src/view/panels/CpuPanels.cpp
   src/view/panels/StatePanels.cpp
   src/view/panels/InfoPanels.cpp
   src/view/panels/ConfigPanels.cpp

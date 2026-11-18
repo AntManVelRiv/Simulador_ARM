@@ -45,6 +45,12 @@ static const char* HELP =
 "                      se lee del teclado (entrada estándar)\n"
 "  --max-steps N       límite de instrucciones (por defecto 50000000)\n"
 "\n"
+"Procesador simulado\n"
+"  --cpu TIPO          single (monociclo, por defecto) | multi (multiciclo) | pipe (segmentado)\n"
+"  --stages N          etapas del segmentado, de 2 a 10 (por defecto 5: BI, LR, E, M, ER)\n"
+"  --no-forward        segmentado sin anticipación (forwarding): más paradas por dependencias\n"
+"  --stats             muestra ciclos, instrucciones y CPI al terminar (en la salida de error)\n"
+"\n"
 "Depuración\n"
 "  --trace             muestra cada instrucción ejecutada (en la salida de error)\n"
 "  --regs              muestra los registros y flags al terminar\n"
@@ -81,7 +87,7 @@ static std::string unescape(const std::string& s) {
 bool cliWanted(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
-        if (a == "-h" || a == "--help" || a == "--run" || a == "--cli" || a == "--headless" || a == "--call" || a == "--check" || a == "--listing" || a == "--entry" || a == "--symbols" || a == "--cc" || a == "--help-gcc" || a == "--show-asm" || a == "--emit-asm") return true;
+        if (a == "-h" || a == "--help" || a == "--run" || a == "--cli" || a == "--headless" || a == "--call" || a == "--check" || a == "--listing" || a == "--entry" || a == "--cpu" || a == "--stats" || a == "--symbols" || a == "--cc" || a == "--help-gcc" || a == "--show-asm" || a == "--emit-asm") return true;
         if (a.size() > 2 && (a.compare(a.size() - 2, 2, ".c") == 0 || a.compare(a.size() - 2, 2, ".C") == 0)) return true;
     }
     return false;
@@ -99,6 +105,14 @@ int cliMain(int argc, char** argv) {
         else if (a == "--trace") ro.trace = true;
         else if (a == "--regs") ro.showRegs = true;
         else if (a == "--return") ro.showReturn = true;
+        else if (a == "--stats") ro.showStats = true;
+        else if (a == "--no-forward") ro.cpu.forwarding = false;
+        else if (a == "--cpu") { if (!(v = need(i, "--cpu"))) return 1; std::string t = v;
+            if (t == "single" || t == "mono" || t == "monociclo") ro.cpu.kind = CpuKind::Single;
+            else if (t == "multi" || t == "multiciclo") ro.cpu.kind = CpuKind::Multi;
+            else if (t == "pipe" || t == "pipeline" || t == "segmentado") ro.cpu.kind = CpuKind::Pipelined;
+            else { std::cerr << "--cpu: usa single, multi o pipe\n"; return 1; } }
+        else if (a == "--stages") { if (!(v = need(i, "--stages"))) return 1; int n = std::atoi(v); if (n < PIPE_MIN_STAGES || n > PIPE_MAX_STAGES) { std::cerr << "--stages: de " << PIPE_MIN_STAGES << " a " << PIPE_MAX_STAGES << "\n"; return 1; } ro.cpu.stages = n; ro.cpu.kind = ro.cpu.kind == CpuKind::Single ? CpuKind::Pipelined : ro.cpu.kind; }
         else if (a == "--listing") listing = true;
         else if (a == "--check") check = true;
         else if (a == "--symbols") symbols = true;

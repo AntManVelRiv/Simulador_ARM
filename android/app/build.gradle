@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.armsim.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.armsim.app'
+        minSdk 26            // Android 8.0 (std::filesystem necesita API 26)
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+
+        // APK UNIVERSAL: un único .apk con las cuatro arquitecturas (móviles/tablets ARM de 32 y 64 bits y emuladores x86)
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64' }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static',
+                          '-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384'   // compatible con páginas de 16 KB (Android 15+)
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    // Sin "splits": Gradle genera UN solo APK con todas las ABI. Se firma con la clave de depuración
+    // para que se pueda instalar directamente (para publicar en Google Play, firma con tu propia clave).
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    // La parte Java de SDL2 (SDLActivity...) se compila directamente desde el código fuente descargado
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/java', '../SDL2/android-project/app/src/main/java']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

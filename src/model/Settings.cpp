@@ -5,6 +5,7 @@
 #include <map>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 
 static Color c8(int r, int g, int b) { return Color{r / 255.f, g / 255.f, b / 255.f, 1.f}; }
 
@@ -22,7 +23,7 @@ const std::vector<ThemePreset>& themePresets() {
 
 static const char* TITLES[P_COUNT] = {
     "Editor", "Código máquina", "Registros", "Instrucción actual", "Camino de datos", "Memoria", "Pila",
-    "Traza", "Consola", "Símbolos", "Codificador", "Mapa de memoria y estado inicial", "Referencia", "Ajustes y personalización", "Acerca de"
+    "Traza", "Consola", "Símbolos", "Codificador", "Mapa de memoria y estado inicial", "Referencia", "Ajustes y personalización", "Acerca de", "Ciclos y segmentación"
 };
 const char* panelTitle(PanelId id) { return TITLES[id]; }
 
@@ -39,7 +40,11 @@ bool resolveLowPower(int mode) {
     if (g_powerOverride == 1) return true;
     if (mode == 1) return true;
     if (mode == 2) return false;
+#if defined(__ANDROID__)
+    return true;      // en el móvil/tablet se ahorra batería: la app duerme mientras no hay actividad
+#else
     return platform::isRaspberryPi();
+#endif
 }
 
 static std::string colStr(const Color& c) { char b[96]; std::snprintf(b, sizeof b, "%.4f,%.4f,%.4f,%.4f", c.r, c.g, c.b, c.a); return b; }
@@ -53,6 +58,7 @@ bool SettingsStore::save(const Settings& s, const std::string& path) {
     f << "powerMode=" << u.powerMode << "\n";
     f << "regFormat=" << u.regFormat << "\nmemCols=" << u.memCols << "\nmemAscii=" << u.memAscii << "\n";
     f << "stepsPerSec=" << s.sim.stepsPerSec << "\ntextBase=" << s.sim.opt.textBase << "\ndataBase=" << s.sim.opt.dataBase << "\nstackTop=" << s.sim.opt.stackTop << "\nlastFile=" << s.lastFile << "\n";
+    f << "cpuKind=" << (int)s.sim.cpu.kind << "\npipeStages=" << s.sim.cpu.stages << "\nforwarding=" << s.sim.cpu.forwarding << "\n";
     const char* n[8] = {"bg","panel","accent","accent2","text","good","warn","bad"};
     const Color* v[8] = {&u.col.bg,&u.col.panel,&u.col.accent,&u.col.accent2,&u.col.text,&u.col.good,&u.col.warn,&u.col.bad};
     for (int i = 0; i < 8; i++) f << "col_" << n[i] << "=" << colStr(*v[i]) << "\n";
@@ -75,6 +81,8 @@ bool SettingsStore::load(Settings& s, const std::string& path) {
     u.regFormat = gi("regFormat", 0); u.memCols = gi("memCols", 16); u.memAscii = gi("memAscii", 1);
     s.sim.stepsPerSec = gf("stepsPerSec", 30); s.sim.opt.textBase = gu("textBase", arm::TEXT_BASE); s.sim.opt.dataBase = gu("dataBase", arm::DATA_BASE); s.sim.opt.stackTop = gu("stackTop", arm::STACK_TOP);
     if (kv.count("lastFile")) s.lastFile = kv["lastFile"];
+    { int ck = gi("cpuKind", 0); s.sim.cpu.kind = (ck == 1) ? arm::CpuKind::Multi : (ck == 2) ? arm::CpuKind::Pipelined : arm::CpuKind::Single;
+      s.sim.cpu.stages = std::max(arm::PIPE_MIN_STAGES, std::min(arm::PIPE_MAX_STAGES, gi("pipeStages", arm::PIPE_DEFAULT_STAGES))); s.sim.cpu.forwarding = gi("forwarding", 1) != 0; }
     const char* n[8] = {"bg","panel","accent","accent2","text","good","warn","bad"};
     Color* v[8] = {&u.col.bg,&u.col.panel,&u.col.accent,&u.col.accent2,&u.col.text,&u.col.good,&u.col.warn,&u.col.bad};
     for (int i = 0; i < 8; i++) { std::string k = std::string("col_") + n[i]; if (kv.count(k)) *v[i] = strCol(kv[k], *v[i]); }
