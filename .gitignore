@@ -1,0 +1,11 @@
+
+# Android
+android/SDL2/
+android/SDL2.tar.gz
+android/.gradle/
+android/.gradle-dist/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/build/
+ARMSim-universal.apk
