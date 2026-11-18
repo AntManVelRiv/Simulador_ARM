@@ -13,10 +13,14 @@ on:
 permissions:
   contents: write      # solo para adjuntar el APK a una Release cuando se publica una etiqueta
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +29,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Se instalan EXPLÍCITAMENTE las versiones que usa app/build.gradle, para que Gradle no tenga que
+      # descargarlas a mitad de compilación (ahí es donde solía fallar por licencias/permisos).
       - name: Android SDK (acepta licencias)
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 cmake;3.22.1 ndk;26.1.10909125'
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -36,7 +44,7 @@ jobs:
         run: bash android/fetch-sdl.sh
 
       - name: Construir el APK
-        run: gradle -p android --no-daemon assembleRelease
+        run: gradle -p android --no-daemon --stacktrace assembleRelease
 
       - name: Renombrar
         run: cp android/app/build/outputs/apk/release/app-release.apk ARMSim-universal.apk
